@@ -11,9 +11,9 @@ release_dir="$MIDAS_DEPLOY_DIR/releases/$MIDAS_DEPLOY_SHA"
 
 DEBIAN_FRONTEND=noninteractive apt-get install -y caddy curl ca-certificates
 mkdir -p "$MIDAS_DEPLOY_DIR/releases" "$MIDAS_DATA_DIR"
-curl -fsS "$release_base/$MIDAS_ARCHIVE_NAME" -o "/tmp/$MIDAS_ARCHIVE_NAME"
-curl -fsS "$release_base/$MIDAS_ARCHIVE_NAME.sha256" -o "/tmp/$MIDAS_ARCHIVE_NAME.sha256"
-curl -fsS "$release_base/$MIDAS_METADATA_NAME" -o "/tmp/$MIDAS_METADATA_NAME"
+curl -fsSL "$release_base/$MIDAS_ARCHIVE_NAME" -o "/tmp/$MIDAS_ARCHIVE_NAME"
+curl -fsSL "$release_base/$MIDAS_ARCHIVE_NAME.sha256" -o "/tmp/$MIDAS_ARCHIVE_NAME.sha256"
+curl -fsSL "$release_base/$MIDAS_METADATA_NAME" -o "/tmp/$MIDAS_METADATA_NAME"
 (cd /tmp && sha256sum -c "$MIDAS_ARCHIVE_NAME.sha256")
 test "$(python3 -c "import json; print(json.load(open('/tmp/$MIDAS_METADATA_NAME'))['git_sha'])")" = "$MIDAS_DEPLOY_SHA"
 rm -rf "$release_dir"
