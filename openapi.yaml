@@ -67,7 +67,7 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/DepositRequest' }
-      responses: { '200': { description: Credited deposit }, '409': { description: Transaction is not final or already credited }, '422': { description: Transaction, asset, or recipient does not match }, '502': { description: Blockchain RPC is unavailable; retry without balance change } }
+      responses: { '200': { description: Credited deposit }, '409': { description: Transaction is not final or already credited }, '422': { description: "Transaction, asset, or recipient does not match" }, '502': { description: Blockchain RPC is unavailable; retry without balance change } }
   /transfers:
     post:
       summary: Atomically move an available USD balance to another existing Midas user
@@ -144,11 +144,22 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/EvmConfigInput' }
       responses: { '200': { description: Saved configuration } }
+  /admin/deposits:
+    get:
+      summary: Root-only deposit and collection-operation history, newest first
+      responses:
+        '200':
+          description: Up to 100 credited deposits with their collection state and public transaction references
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminDeposit' }
   /admin/deposits/{id}/sweep:
     post:
-      summary: Root-only retry of the gas-funding and ERC-20 collection sequence
+      summary: Root-only retry of a queued, failed, or awaiting-configuration gas-funding and ERC-20 collection sequence
       parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
-      responses: { '200': { description: Sweep submitted or awaiting configuration } }
+      responses: { '200': { description: Sweep submitted or awaiting configuration }, '409': { description: Collection is already submitted } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
@@ -203,4 +214,24 @@ components:
     EvmConfigInput:
       type: object
       properties:
-        custody_wallet_private_key: { type: string, writeOnly: true, description: One EVM key funds gas, collects deposits, and signs withdrawals. Its address is derived server-side. }
+        custody_wallet_private_key: { type: string, writeOnly: true, description: "One EVM key funds gas, collects deposits, and signs withdrawals. Its address is derived server-side." }
+    AdminDeposit:
+      type: object
+      required: [id, user_id, deposit_address, asset_symbol, chain_id, network_name, amount_usd_micros, amount_usd, transaction_hash, sweep_status, created_at, sweep_operation_status, sweep_updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        deposit_address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$' }
+        asset_symbol: { type: string, enum: [USDC, USDT] }
+        chain_id: { type: integer, enum: [1, 10, 56, 137, 8453, 42161] }
+        network_name: { type: string }
+        amount_usd_micros: { type: integer, format: int64 }
+        amount_usd: { type: string }
+        transaction_hash: { type: string, pattern: '^0x[a-fA-F0-9]{64}$' }
+        sweep_status: { type: string, enum: [queued, awaiting_configuration, submitted, swept, failed] }
+        created_at: { type: string, format: date-time }
+        sweep_operation_status: { type: string, enum: [queued, submitted, swept, failed] }
+        gas_transaction_hash: { type: [string, 'null'] }
+        token_transaction_hash: { type: [string, 'null'] }
+        sweep_error_message: { type: [string, 'null'] }
+        sweep_updated_at: { type: string, format: date-time }

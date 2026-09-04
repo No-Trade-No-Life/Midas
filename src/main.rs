@@ -186,6 +186,7 @@ struct AppState {
     db: SqlitePool,
     verifier: AuthMiniVerifier,
     write_lock: Arc<Mutex<()>>,
+    sweep_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug)]
@@ -340,6 +341,26 @@ struct DepositResponse {
     sweep_status: String,
 }
 
+#[derive(Serialize)]
+struct AdminDeposit {
+    id: String,
+    user_id: String,
+    deposit_address: String,
+    asset_symbol: String,
+    chain_id: i64,
+    network_name: String,
+    amount_usd_micros: i64,
+    amount_usd: String,
+    transaction_hash: String,
+    sweep_status: String,
+    created_at: String,
+    sweep_operation_status: String,
+    gas_transaction_hash: Option<String>,
+    token_transaction_hash: Option<String>,
+    sweep_error_message: Option<String>,
+    sweep_updated_at: String,
+}
+
 #[derive(Deserialize)]
 struct TransferRequest {
     recipient_user_id: String,
@@ -475,6 +496,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         verifier,
         write_lock: Arc::new(Mutex::new(())),
+        sweep_lock: Arc::new(Mutex::new(())),
     });
     let addr = "127.0.0.1:8787"
         .parse::<SocketAddr>()
@@ -516,6 +538,7 @@ fn app(state: AppState) -> Router {
             "/admin/evm-config",
             get(read_evm_config).put(write_evm_config),
         )
+        .route("/admin/deposits", get(list_admin_deposits))
         .route("/admin/deposits/:id/sweep", post(retry_sweep))
         .with_state(state);
     Router::new()
@@ -806,7 +829,9 @@ async fn confirm_deposit(
         tx.commit().await.map_err(db_error)?;
         deposit_id
     };
-    let _ = submit_sweep(&state, &deposit_id).await;
+    if let Err(error) = submit_sweep(&state, &deposit_id).await {
+        mark_sweep_failed(&state, &deposit_id, &error.message).await?;
+    }
     Ok(Json(read_deposit_response(&state.db, &deposit_id).await?))
 }
 
@@ -1286,17 +1311,72 @@ async fn write_evm_config(
     Ok(Json(load_evm_config(&state.db).await?))
 }
 
+async fn list_admin_deposits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AdminDeposit>>, ApiError> {
+    require_root(&state, &headers).await?;
+    let rows = sqlx::query("SELECT d.id,d.user_id,w.address,a.symbol,n.chain_id,n.name,e.amount_usd_micros,d.transaction_hash,d.sweep_status,d.created_at,s.status,s.gas_transaction_hash,s.token_transaction_hash,s.error_message,s.updated_at FROM deposits d JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id JOIN ledger_entries e ON e.id=d.ledger_entry_id JOIN deposit_sweeps s ON s.deposit_id=d.id ORDER BY d.created_at DESC,d.id DESC LIMIT 100")
+        .fetch_all(&state.db)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| {
+                let amount_usd_micros: i64 = row.get(6);
+                AdminDeposit {
+                    id: row.get(0),
+                    user_id: row.get(1),
+                    deposit_address: row.get(2),
+                    asset_symbol: row.get(3),
+                    chain_id: row.get(4),
+                    network_name: row.get(5),
+                    amount_usd_micros,
+                    amount_usd: format_usd(amount_usd_micros),
+                    transaction_hash: row.get(7),
+                    sweep_status: row.get(8),
+                    created_at: row.get(9),
+                    sweep_operation_status: row.get(10),
+                    gas_transaction_hash: row.get(11),
+                    token_transaction_hash: row.get(12),
+                    sweep_error_message: row.get(13),
+                    sweep_updated_at: row.get(14),
+                }
+            })
+            .collect(),
+    ))
+}
+
 async fn retry_sweep(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<DepositResponse>, ApiError> {
     require_root(&state, &headers).await?;
-    submit_sweep(&state, &id).await?;
+    let _sweep = state.sweep_lock.lock().await;
+    require_retryable_sweep(&state.db, &id).await?;
+    if let Err(error) = submit_sweep_locked(&state, &id).await {
+        mark_sweep_failed(&state, &id, &error.message).await?;
+        return Err(error);
+    }
     Ok(Json(read_deposit_response(&state.db, &id).await?))
 }
 
 async fn submit_sweep(state: &AppState, deposit_id: &str) -> Result<(), ApiError> {
+    let _sweep = state.sweep_lock.lock().await;
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT sweep_status FROM deposits WHERE id=?1")
+            .bind(deposit_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(db_error)?;
+    if matches!(status.as_deref(), Some("submitted") | Some("swept")) {
+        return Ok(());
+    }
+    submit_sweep_locked(state, deposit_id).await
+}
+
+async fn submit_sweep_locked(state: &AppState, deposit_id: &str) -> Result<(), ApiError> {
     let row = sqlx::query("SELECT d.asset_id,d.raw_amount,w.address,k.private_key,a.contract_address,n.rpc_url,n.chain_id FROM deposits d JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN wallet_private_keys k ON k.wallet_address_id=w.id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE d.id=?1")
         .bind(deposit_id)
         .fetch_optional(&state.db)
@@ -1395,6 +1475,49 @@ async fn submit_sweep(state: &AppState, deposit_id: &str) -> Result<(), ApiError
         .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
     Ok(())
+}
+
+async fn require_retryable_sweep(db: &SqlitePool, deposit_id: &str) -> Result<(), ApiError> {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT sweep_status FROM deposits WHERE id=?1")
+            .bind(deposit_id)
+            .fetch_optional(db)
+            .await
+            .map_err(db_error)?;
+    match status.as_deref() {
+        Some(value) if sweep_is_retryable(value) => Ok(()),
+        Some(_) => Err(ApiError::conflict(
+            "the collection has already been submitted and cannot be retried",
+        )),
+        None => Err(ApiError::invalid("deposit does not exist")),
+    }
+}
+
+fn sweep_is_retryable(status: &str) -> bool {
+    matches!(status, "queued" | "awaiting_configuration" | "failed")
+}
+
+async fn mark_sweep_failed(
+    state: &AppState,
+    deposit_id: &str,
+    error_message: &str,
+) -> Result<(), ApiError> {
+    let _write = state.write_lock.lock().await;
+    let now = Utc::now().to_rfc3339();
+    let mut tx = state.db.begin().await.map_err(db_error)?;
+    sqlx::query("UPDATE deposits SET sweep_status='failed' WHERE id=?1")
+        .bind(deposit_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    sqlx::query("UPDATE deposit_sweeps SET status='failed',error_message=?1,updated_at=?2 WHERE deposit_id=?3")
+        .bind(error_message)
+        .bind(&now)
+        .bind(deposit_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)
 }
 
 async fn mark_sweep_configuration(state: &AppState, deposit_id: &str) -> Result<(), ApiError> {
@@ -2099,6 +2222,15 @@ mod tests {
     fn formats_usd_micros() {
         assert_eq!(format_usd(1_250_000), "1.250000");
         assert_eq!(format_usd(-1), "-0.000001");
+    }
+
+    #[test]
+    fn only_unsubmitted_sweeps_are_retryable() {
+        assert!(sweep_is_retryable("queued"));
+        assert!(sweep_is_retryable("awaiting_configuration"));
+        assert!(sweep_is_retryable("failed"));
+        assert!(!sweep_is_retryable("submitted"));
+        assert!(!sweep_is_retryable("swept"));
     }
 
     #[test]
