@@ -12,7 +12,7 @@ permissions:
   id-token: write
 env:
   AWS_REGION: ap-southeast-1
-  INSTANCE_ID: i-0574c0e78cb3ca1d1
+  INSTANCE_ID: i-07869d8d73ac72225
   SERVICE_NAME: midas
   DEPLOY_DIR: /opt/midas
   DATA_DIR: /var/lib/midas
