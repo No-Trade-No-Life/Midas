@@ -14,7 +14,7 @@ if ! id -u midas >/dev/null 2>&1; then
   useradd --system --home-dir "$MIDAS_DATA_DIR" --shell /usr/sbin/nologin midas
 fi
 mkdir -p "$MIDAS_DEPLOY_DIR/releases" "$MIDAS_DATA_DIR"
-chown midas:midas "$MIDAS_DATA_DIR"
+chown -R midas:midas "$MIDAS_DATA_DIR"
 chmod 700 "$MIDAS_DATA_DIR"
 curl -fsSL "$release_base/$MIDAS_ARCHIVE_NAME" -o "/tmp/$MIDAS_ARCHIVE_NAME"
 curl -fsSL "$release_base/$MIDAS_ARCHIVE_NAME.sha256" -o "/tmp/$MIDAS_ARCHIVE_NAME.sha256"
