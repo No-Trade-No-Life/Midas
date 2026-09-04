@@ -1,0 +1,59 @@
+openapi: 3.1.0
+info:
+  title: Midas API
+  version: 0.1.0
+  description: >-
+    USD-denominated EVM stablecoin payment ledger. Chain execution, custody-key
+    handling, deposit watching, sweeping, withdrawals, and transfers are disabled in v1.
+servers:
+  - url: https://midas.ntnl.io/api
+paths:
+  /health:
+    get:
+      summary: Service health and v1 custody boundary
+      responses: { '200': { description: Healthy } }
+  /auth/config:
+    get:
+      summary: Public Auth Mini and Linkit integration configuration
+      responses: { '200': { description: Auth configuration } }
+  /setup/status:
+    get:
+      summary: Read root setup status
+      responses: { '200': { description: Setup status } }
+  /setup/initialize:
+    post:
+      summary: Bootstrap root_user_id once with the authenticated Auth Mini subject
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: Initialized }, '409': { description: Already initialized } }
+  /balances/me:
+    get:
+      summary: Read current user's USD ledger balance
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: USD balance } }
+  /ledger/me:
+    get:
+      summary: Read current user's immutable USD ledger entries
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: Ledger entries } }
+  /wallet-addresses/me:
+    get:
+      summary: Read current user's allocated EVM deposit addresses
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: Deposit addresses } }
+  /admin/evm-config:
+    get:
+      summary: Read root-managed public EVM configuration
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: EVM configuration } }
+    put:
+      summary: Update root-managed public EVM configuration; never accepts private keys
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: EVM configuration } }
+  /admin/custody/private-key:
+    post:
+      summary: Explicitly disabled in v1
+      security: [{ bearerAuth: [] }]
+      responses: { '501': { description: Custody private-key handling disabled } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
