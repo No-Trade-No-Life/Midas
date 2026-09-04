@@ -15,7 +15,7 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 - The ledger's sole unit is integer USD micro-dollars. Built-in USDC and USDT maps cover Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon; token amounts are converted exactly to USD micro-dollars, including the 18-decimal BSC assets.
 - Midas never background-scans a chain. The client or integrating application submits one transaction hash; Midas verifies the specified transaction receipt and ERC-20 `Transfer` log against the user's dedicated address.
 - A confirmed deposit credits the USD ledger, then queues a two-step collection: the single custody wallet funds native gas and the user's stored deposit key signs the ERC-20 transfer back to that same custody address.
-- Transfers are paired, immutable USD ledger entries and use Linkit's username picker. Withdrawals reserve the available USD balance, require an approved same-chain address-book entry, and broadcast an ERC-20 transfer only when the custody signer exists.
+- Transfers are paired, immutable USD ledger entries and use Linkit's username picker. Withdrawals select a chain and USDC/USDT, reserve the available USD balance, accept a direct same-chain EVM destination, and broadcast only when the custody signer exists. The user can then save that destination from its history.
 
 ## Trust and operational boundary
 

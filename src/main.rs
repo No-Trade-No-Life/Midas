@@ -40,6 +40,10 @@ const CUSTODY_WALLET_PRIVATE_KEY_KEY: &str = "evm_custody_wallet_private_key";
 const LEGACY_GAS_ACCOUNT_PRIVATE_KEY_KEY: &str = "evm_gas_account_private_key";
 const LEGACY_COLLECTION_WALLET_PRIVATE_KEY_KEY: &str = "evm_collection_wallet_private_key";
 const DEFAULT_GAS_FUNDING_WEI: &str = "1000000000000000";
+// `wallet_addresses.chain_id` remains on disk for existing SQLite databases.
+// A user deposit key is EVM-compatible, so new rows use this internal sentinel
+// and no API or query exposes it as a per-chain choice.
+const EVM_ADDRESS_SENTINEL_CHAIN_ID: i64 = 1;
 
 #[derive(Clone, Copy)]
 struct BuiltinEvmNetwork {
@@ -316,20 +320,12 @@ struct EvmConfigInput {
 
 #[derive(Serialize)]
 struct WalletAddress {
-    chain_id: i64,
     address: String,
-    custody_status: &'static str,
     created_at: String,
 }
 
 #[derive(Deserialize)]
-struct WalletProvisionRequest {
-    chain_id: i64,
-}
-
-#[derive(Deserialize)]
 struct DepositRequest {
-    chain_id: i64,
     asset_id: String,
     transaction_hash: String,
 }
@@ -363,7 +359,7 @@ struct TransferResponse {
 #[derive(Deserialize)]
 struct WithdrawalRequest {
     asset_id: String,
-    address_book_entry_id: String,
+    destination_address: String,
     amount_usd_micros: i64,
     note: Option<String>,
 }
@@ -432,6 +428,11 @@ struct AddressBookEntryUpdate {
     label: String,
 }
 
+#[derive(Deserialize)]
+struct WithdrawalAddressBookInput {
+    label: String,
+}
+
 struct LedgerInsert<'a> {
     id: &'a str,
     user_id: &'a str,
@@ -494,10 +495,7 @@ fn app(state: AppState) -> Router {
         .route("/assets", get(list_assets))
         .route("/balances/me", get(my_balance))
         .route("/ledger/me", get(my_ledger))
-        .route(
-            "/wallet-addresses/me",
-            get(my_wallet_addresses).post(provision_wallet_address),
-        )
+        .route("/wallet-addresses/me", get(my_wallet_addresses))
         .route("/deposits/confirm", post(confirm_deposit))
         .route("/transfers", post(create_transfer))
         .route(
@@ -509,6 +507,10 @@ fn app(state: AppState) -> Router {
             put(update_address_book_entry).delete(delete_address_book_entry),
         )
         .route("/withdrawals", get(my_withdrawals).post(create_withdrawal))
+        .route(
+            "/withdrawals/:id/address-book",
+            post(save_withdrawal_destination),
+        )
         .route("/withdrawals/:id/finalize", post(finalize_withdrawal))
         .route(
             "/admin/evm-config",
@@ -651,58 +653,40 @@ async fn my_wallet_addresses(
     headers: HeaderMap,
 ) -> Result<Json<Vec<WalletAddress>>, ApiError> {
     let user_id = require_initialized_user(&state, &headers).await?;
-    let rows = sqlx::query("SELECT chain_id,address,created_at FROM wallet_addresses WHERE user_id=?1 ORDER BY chain_id")
+    let row = sqlx::query("SELECT address,created_at FROM wallet_addresses WHERE user_id=?1 ORDER BY created_at,id LIMIT 1")
         .bind(user_id)
-        .fetch_all(&state.db)
+        .fetch_optional(&state.db)
         .await
-        .map_err(db_error)?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|row| WalletAddress {
-                chain_id: row.get(0),
-                address: row.get(1),
-                custody_status: "configured",
-                created_at: row.get(2),
-            })
-            .collect(),
-    ))
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "deposit wallet was not initialized"))?;
+    Ok(Json(vec![wallet_address(row)]))
 }
 
-async fn provision_wallet_address(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<WalletProvisionRequest>,
-) -> Result<Json<WalletAddress>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+async fn ensure_user_wallet(state: &AppState, user_id: &str) -> Result<WalletAddress, ApiError> {
     let _write = state.write_lock.lock().await;
+    provision_user_wallet(&state.db, user_id).await
+}
+
+async fn provision_user_wallet(db: &SqlitePool, user_id: &str) -> Result<WalletAddress, ApiError> {
     if let Some(row) = sqlx::query(
-        "SELECT chain_id,address,created_at FROM wallet_addresses WHERE user_id=?1 AND chain_id=?2",
+        "SELECT address,created_at FROM wallet_addresses WHERE user_id=?1 ORDER BY created_at,id LIMIT 1",
     )
-    .bind(&user_id)
-    .bind(input.chain_id)
-    .fetch_optional(&state.db)
+    .bind(user_id)
+    .fetch_optional(db)
     .await
     .map_err(db_error)?
     {
-        return Ok(Json(WalletAddress {
-            chain_id: row.get(0),
-            address: row.get(1),
-            custody_status: "configured",
-            created_at: row.get(2),
-        }));
+        return Ok(wallet_address(row));
     }
-    if builtin_network(input.chain_id).is_none() {
-        return Err(ApiError::invalid("the EVM network is not supported"));
-    }
-    let private_key = LocalWallet::new(&mut thread_rng()).with_chain_id(input.chain_id as u64);
+    let private_key = LocalWallet::new(&mut thread_rng());
     let address = format!("{:#x}", private_key.address());
     let wallet_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let mut tx = state.db.begin().await.map_err(db_error)?;
+    let mut tx = db.begin().await.map_err(db_error)?;
     sqlx::query("INSERT INTO wallet_addresses(id,user_id,chain_id,address,custody_status,created_at) VALUES(?1,?2,?3,?4,'configured',?5)")
         .bind(&wallet_id)
-        .bind(&user_id)
-        .bind(input.chain_id)
+        .bind(user_id)
+        .bind(EVM_ADDRESS_SENTINEL_CHAIN_ID)
         .bind(&address)
         .bind(&now)
         .execute(&mut *tx)
@@ -716,12 +700,17 @@ async fn provision_wallet_address(
         .await
         .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
-    Ok(Json(WalletAddress {
-        chain_id: input.chain_id,
+    Ok(WalletAddress {
         address,
-        custody_status: "configured",
         created_at: now,
-    }))
+    })
+}
+
+fn wallet_address(row: sqlx::sqlite::SqliteRow) -> WalletAddress {
+    WalletAddress {
+        address: row.get(0),
+        created_at: row.get(1),
+    }
 }
 
 async fn confirm_deposit(
@@ -761,7 +750,7 @@ async fn confirm_deposit(
         let now = Utc::now().to_rfc3339();
         let reference = format!(
             "evm:{}:{}:{}",
-            input.chain_id, verified.transaction_hash, verified.log_index
+            target.asset_id, verified.transaction_hash, verified.log_index
         );
         let mut tx = state.db.begin().await.map_err(db_error)?;
         insert_ledger(
@@ -1058,15 +1047,12 @@ async fn create_withdrawal(
             "withdrawal amount must be greater than zero",
         ));
     }
-    let asset = builtin_asset(&input.asset_id)
+    builtin_asset(&input.asset_id)
         .ok_or_else(|| ApiError::invalid("the withdrawal asset is not supported"))?;
-    let address_book_entry =
-        read_address_book_entry(&state.db, &user_id, &input.address_book_entry_id).await?;
-    if address_book_entry.chain_id != asset.chain_id {
-        return Err(ApiError::invalid(
-            "the withdrawal asset and address book entry must use the same EVM network",
-        ));
-    }
+    let destination_address = format!(
+        "{:#x}",
+        parse_address(&input.destination_address, "destination_address")?
+    );
     let _write = state.write_lock.lock().await;
     if let Some(existing) =
         operation_resource(&state.db, &user_id, "withdrawal", &idempotency_key).await?
@@ -1100,13 +1086,12 @@ async fn create_withdrawal(
         },
     )
     .await?;
-    sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,address_book_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'awaiting_signer',?8,?8)")
+    sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,address_book_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,?3,?4,NULL,?5,?6,'awaiting_signer',?7,?7)")
         .bind(&withdrawal_id)
         .bind(&user_id)
         .bind(&input.asset_id)
         .bind(&ledger_id)
-        .bind(&address_book_entry.id)
-        .bind(&address_book_entry.address)
+        .bind(&destination_address)
         .bind(input.amount_usd_micros)
         .bind(&now)
         .execute(&mut *tx)
@@ -1150,6 +1135,79 @@ async fn my_withdrawals(
         withdrawals.push(read_withdrawal_response(&state.db, &id).await?);
     }
     Ok(Json(withdrawals))
+}
+
+async fn save_withdrawal_destination(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<WithdrawalAddressBookInput>,
+) -> Result<Json<AddressBookEntry>, ApiError> {
+    let user_id = require_initialized_user(&state, &headers).await?;
+    let label = address_book_label(&input.label)?;
+    let _write = state.write_lock.lock().await;
+    Ok(Json(
+        save_withdrawal_destination_for_user(&state.db, &user_id, &id, &label).await?,
+    ))
+}
+
+async fn save_withdrawal_destination_for_user(
+    db: &SqlitePool,
+    user_id: &str,
+    id: &str,
+    label: &str,
+) -> Result<AddressBookEntry, ApiError> {
+    let withdrawal = sqlx::query("SELECT a.chain_id,w.destination_address,w.address_book_entry_id FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id WHERE w.id=?1 AND w.user_id=?2")
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::invalid("withdrawal does not exist"))?;
+    let chain_id: i64 = withdrawal.get(0);
+    let destination_address: String = withdrawal.get(1);
+    let linked_entry_id: Option<String> = withdrawal.get(2);
+    if let Some(entry_id) = linked_entry_id {
+        return read_address_book_entry(db, user_id, &entry_id).await;
+    }
+    let entry_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM address_book_entries WHERE user_id=?1 AND chain_id=?2 AND address=?3",
+    )
+    .bind(user_id)
+    .bind(chain_id)
+    .bind(&destination_address)
+    .fetch_optional(db)
+    .await
+    .map_err(db_error)?;
+    let entry_id = match entry_id {
+        Some(entry_id) => entry_id,
+        None => {
+            let entry_id = Uuid::new_v4().to_string();
+            let now = Utc::now().to_rfc3339();
+            sqlx::query("INSERT INTO address_book_entries(id,user_id,chain_id,label,address,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)")
+                .bind(&entry_id)
+                .bind(user_id)
+                .bind(chain_id)
+                .bind(label)
+                .bind(&destination_address)
+                .bind(&now)
+                .execute(db)
+                .await
+                .map_err(db_error)?;
+            entry_id
+        }
+    };
+    sqlx::query(
+        "UPDATE withdrawals SET address_book_entry_id=?1,updated_at=?2 WHERE id=?3 AND user_id=?4",
+    )
+    .bind(&entry_id)
+    .bind(Utc::now().to_rfc3339())
+    .bind(id)
+    .bind(user_id)
+    .execute(db)
+    .await
+    .map_err(db_error)?;
+    read_address_book_entry(db, user_id, &entry_id).await
 }
 
 async fn finalize_withdrawal(
@@ -1409,18 +1467,12 @@ async fn load_deposit_target(
 ) -> Result<DepositTarget, ApiError> {
     let asset = builtin_asset(&input.asset_id)
         .ok_or_else(|| ApiError::invalid("the deposit asset is not supported"))?;
-    if input.chain_id != asset.chain_id {
-        return Err(ApiError::invalid(
-            "the deposit asset does not belong to the selected EVM network",
-        ));
-    }
-    let row = sqlx::query("SELECT w.id,w.address FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id WHERE w.user_id=?1 AND w.chain_id=?2")
+    let row = sqlx::query("SELECT w.id,w.address FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id WHERE w.user_id=?1 ORDER BY w.created_at,w.id LIMIT 1")
         .bind(user_id)
-        .bind(input.chain_id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
-        .ok_or_else(|| ApiError::invalid("provision a wallet and choose an enabled asset before confirming a deposit"))?;
+        .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "deposit wallet was not initialized"))?;
     Ok(DepositTarget {
         wallet_id: row.get(0),
         address: row.get(1),
@@ -1824,7 +1876,9 @@ async fn require_initialized_user(
     {
         return Err(ApiError::not_configured());
     }
-    require_user(state, headers).await
+    let user_id = require_user(state, headers).await?;
+    ensure_user_wallet(state, &user_id).await?;
+    Ok(user_id)
 }
 
 async fn require_root(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
@@ -2037,6 +2091,113 @@ mod tests {
     fn evm_private_keys_generate_addresses() {
         let wallet = LocalWallet::new(&mut thread_rng());
         assert!(format!("{:#x}", wallet.address()).starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn each_user_gets_one_private_evm_wallet_without_a_chain_api_field() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let first = provision_user_wallet(&db, &user_id).await.unwrap();
+        let second = provision_user_wallet(&db, &user_id).await.unwrap();
+        assert_eq!(first.address, second.address);
+        assert!(
+            serde_json::to_value(first)
+                .unwrap()
+                .get("chain_id")
+                .is_none()
+        );
+        let address_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wallet_addresses WHERE user_id=?1")
+                .bind(&user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let key_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_private_keys WHERE wallet_address_id IN (SELECT id FROM wallet_addresses WHERE user_id=?1)",
+        )
+        .bind(&user_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(address_count, 1);
+        assert_eq!(key_count, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn withdrawal_requests_use_a_direct_destination_address() {
+        let request: WithdrawalRequest = serde_json::from_value(serde_json::json!({
+            "asset_id": "1-USDC",
+            "destination_address": "0x0000000000000000000000000000000000000001",
+            "amount_usd_micros": 1_000_000,
+        }))
+        .unwrap();
+        assert_eq!(
+            request.destination_address,
+            "0x0000000000000000000000000000000000000001"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_withdrawal_destination_can_be_saved_once_and_reused() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let withdrawal_id = Uuid::new_v4().to_string();
+        let ledger_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let address = "0x0000000000000000000000000000000000000001";
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'withdrawal','pending','1-USDC',1000000,-1000000,?3)")
+            .bind(&ledger_id)
+            .bind(&user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,'1-USDC',?3,?4,1000000,'awaiting_signer',?5,?5)")
+            .bind(&withdrawal_id)
+            .bind(&user_id)
+            .bind(&ledger_id)
+            .bind(address)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let saved = save_withdrawal_destination_for_user(&db, &user_id, &withdrawal_id, "Treasury")
+            .await
+            .unwrap();
+        let reused = save_withdrawal_destination_for_user(&db, &user_id, &withdrawal_id, "Ignored")
+            .await
+            .unwrap();
+        assert_eq!(saved.id, reused.id);
+        assert_eq!(saved.label, "Treasury");
+        assert_eq!(saved.chain_id, 1);
+        assert_eq!(saved.address, address);
+        let linked_entry_id: Option<String> = sqlx::query_scalar(
+            "SELECT address_book_entry_id FROM withdrawals WHERE id=?1 AND user_id=?2",
+        )
+        .bind(&withdrawal_id)
+        .bind(&user_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(linked_entry_id.as_deref(), Some(saved.id.as_str()));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

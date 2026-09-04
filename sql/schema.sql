@@ -33,12 +33,14 @@ CREATE TABLE IF NOT EXISTS supported_assets (
 CREATE TABLE IF NOT EXISTS wallet_addresses (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
+  -- Retained as an internal migration sentinel. An EVM address is reusable on
+  -- every supported chain, so Midas stores one address per user, not per chain.
   chain_id INTEGER NOT NULL REFERENCES evm_networks(chain_id),
   address TEXT NOT NULL,
   custody_status TEXT NOT NULL DEFAULT 'configured' CHECK (custody_status = 'configured'),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(chain_id, address),
-  UNIQUE(user_id, chain_id)
+  UNIQUE(user_id)
 );
 
 -- Midas is a custodial service. This table deliberately keeps the user deposit
