@@ -1,0 +1,17 @@
+{
+  "name": "midas-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": { "dev": "vite --host 127.0.0.1", "build": "tsc -b && vite build", "typecheck": "tsc -b", "test": "node scripts/check-boundaries.mjs && npm run build" },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "auth-mini": "^0.4.6",
+    "auth-mini-react-components": "^0.6.3",
+    "linkit-react-components": "0.1.17",
+    "lucide-react": "^1.21.0",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": { "@types/react": "latest", "@types/react-dom": "latest", "typescript": "latest", "vite": "latest" }
+}
