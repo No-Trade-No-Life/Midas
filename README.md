@@ -87,6 +87,8 @@ GET/PUT /api/admin/evm-config
 
 The endpoint never accepts a gas-account private key. `POST /api/admin/custody/private-key` is intentionally `501 Not Implemented`.
 
-## Deployment
+## Safe-skeleton deployment
 
-The target public hostname is `midas.ntnl.io`. Production deployment is deliberately out of this skeleton: first add a reviewed execution architecture, managed secret storage outside SQLite, Auth Mini root initialization, Linkit production UX, rate limits, API client authorization, observability, and normal CI/release/deploy workflow.
+The safe read-only surface is deployed through the tracked Release and Deploy Production workflows to `https://midas.ntnl.io`. The deployed service binds privately to `127.0.0.1:8787`; Caddy terminates TLS and proxies the public hostname. Releases are static Linux artifacts with SHA-256 and Git SHA metadata verification before activation.
+
+This deployment does **not** authorize custody or chain execution. Production continues to reject private-key configuration and does not scan chains, credit deposits, sweep funds, execute withdrawals or transfers, or broadcast transactions. Any future custody or mainnet work still requires reviewed managed secret storage outside SQLite, explicit root bootstrap, rate limits, API client authorization, observability, testnet execution, reconciliation, Safe operations, and legal/compliance approval.
