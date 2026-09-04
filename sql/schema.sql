@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS supported_assets (
   chain_id INTEGER NOT NULL REFERENCES evm_networks(chain_id),
   symbol TEXT NOT NULL CHECK (symbol IN ('USDC', 'USDT')),
   contract_address TEXT NOT NULL,
-  usd_scale INTEGER NOT NULL DEFAULT 6 CHECK (usd_scale = 6),
+  token_decimals INTEGER NOT NULL CHECK (token_decimals BETWEEN 6 AND 18),
   enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
   UNIQUE(chain_id, contract_address),
   UNIQUE(chain_id, symbol)
@@ -117,11 +117,23 @@ CREATE TABLE IF NOT EXISTS internal_transfers (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS address_book_entries (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  chain_id INTEGER NOT NULL REFERENCES evm_networks(chain_id),
+  label TEXT NOT NULL,
+  address TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(user_id, chain_id, address)
+);
+
 CREATE TABLE IF NOT EXISTS withdrawals (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
   asset_id TEXT NOT NULL REFERENCES supported_assets(id),
   ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  address_book_entry_id TEXT REFERENCES address_book_entries(id),
   destination_address TEXT NOT NULL,
   amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros > 0),
   transaction_hash TEXT,
@@ -134,3 +146,5 @@ CREATE INDEX IF NOT EXISTS deposits_user_created_idx
   ON deposits(user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS withdrawals_user_created_idx
   ON withdrawals(user_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS address_book_entries_user_chain_idx
+  ON address_book_entries(user_id, chain_id, created_at DESC, id DESC);

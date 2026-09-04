@@ -1,18 +1,18 @@
 # Midas
 
-**Midas** is a mobile-first, USD-denominated payment infrastructure for configured EVM USDC and USDT.
+**Midas** is a mobile-first, USD-denominated payment infrastructure for built-in EVM USDC and USDT.
 
 ## What Midas includes
 
 - Rust/Axum API with SQLite **WAL** persistence.
-- Exact USD micro-ledger (`amount_usd_micros` / `balance_delta_usd_micros`) for six-decimal EVM USDC and USDT.
-- One persisted dedicated EVM deposit key/address per user and enabled chain; private material is never returned from an API.
+- Exact USD micro-ledger (`amount_usd_micros` / `balance_delta_usd_micros`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD micro-dollars.
+- One persisted dedicated EVM deposit key/address per user and built-in chain; private material is never returned from an API.
 - Receipt-driven deposits: the caller submits one transaction hash, Midas verifies its ERC-20 `Transfer` event, credits USD, then submits the gas-funding and source-wallet collection sequence.
 - Atomic internal transfers, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
-- One-time `app_meta.root_user_id` bootstrap plus root-only EVM network, asset, gas-wallet, and collection-wallet configuration.
+- One-time `app_meta.root_user_id` bootstrap plus a root-only, input-only custody-wallet private key. Its address is derived server-side and the same wallet funds gas, collects deposits, and signs withdrawals.
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary.
-- React `LinkitProvider` boundary for future profile and recipient experiences.
-- Mobile-first web surface that makes disabled execution boundaries explicit.
+- Linkit React Components, including `LinkitAppHeaderUser` and `LinkitUserPicker` for username-based transfer recipients.
+- Per-user, per-chain EVM withdrawal address book. Withdrawals require a saved same-chain address-book entry; the API never accepts a free-form destination address.
 - OpenAPI contract and CI foundation.
 
 ## Architecture
@@ -36,14 +36,15 @@ Midas records **USD only** in integer micro-dollars. Future USDC/USDT chain meta
 | --- | --- |
 | `app_meta` | `root_user_id` and public EVM configuration |
 | `users` | Auth Mini subjects |
-| `evm_networks` | Root-managed chain configuration |
-| `supported_assets` | USDC / USDT metadata |
+| `evm_networks` | Seeded built-in public-RPC chain metadata |
+| `supported_assets` | Seeded USDC / USDT contract and decimal metadata |
 | `wallet_addresses` | One user + one EVM chain deposit address |
 | `wallet_private_keys` | Dedicated EVM deposit private keys; readable only by the service account |
 | `ledger_entries` | Immutable USD balance deltas and payment history |
 | `payment_operations` | Per-user idempotency keys for payment writes |
 | `deposits`, `deposit_sweeps` | Confirmed deposits and the two-step collection state |
-| `internal_transfers`, `withdrawals` | Atomic internal transfers and chain withdrawal state |
+| `address_book_entries` | Per-user, per-chain approved withdrawal destinations |
+| `internal_transfers`, `withdrawals` | Atomic internal transfers and address-book-bound chain withdrawal state |
 
 ## Local development
 
@@ -72,6 +73,8 @@ GET /api/wallet-addresses/me
 POST /api/wallet-addresses/me
 POST /api/deposits/confirm
 POST /api/transfers
+GET/POST /api/address-book/me
+PUT/DELETE /api/address-book/me/{id}
 POST /api/withdrawals
 POST /api/withdrawals/{id}/finalize
 ```
@@ -86,16 +89,16 @@ The first authenticated user can initialize the one-time root setup with its own
 POST /api/setup/initialize
 ```
 
-The root can then configure EVM chains/assets, gas account private key, collection-wallet address, and optionally the collection private key through:
+The root can then configure the single custody wallet through:
 
 ```text
 GET/PUT /api/admin/evm-config
 ```
 
-Read APIs only indicate whether a private key is configured; they never return any key material. An address-only collection wallet keeps withdrawals in `awaiting_signer` state, which supports an external Safe/manual signing policy. Configuring its matching private key enables broadcasts.
+Midas ships the chain, public RPC, and USDC/USDT contract mapping in the binary; callers do not configure these fields. Read APIs only indicate whether the custody key is configured and return its derived public address. The private key is never returned.
 
 ## Deployment
 
 Midas is deployed through the tracked Release and Deploy Production workflows to `https://midas.ntnl.io`. The service binds privately to `127.0.0.1:8787`; Caddy terminates TLS and proxies the public hostname. Releases are static Linux artifacts with SHA-256 and Git SHA metadata verification before activation.
 
-Custody operations must first be configured by the root on a testnet. Treat the SQLite file as a high-value secret: restrict the `/var/lib/midas` directory to the service account, back it up encrypted, and do not configure production private keys until the configured contracts, RPC endpoints, gas funding amount, and withdrawal policy have been independently checked.
+Treat the SQLite file as a high-value secret: restrict the `/var/lib/midas` directory to the service account, back it up encrypted, and do not configure a production custody key until the built-in contract map and withdrawal policy have been independently checked.

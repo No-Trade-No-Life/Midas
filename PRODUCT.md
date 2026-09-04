@@ -12,14 +12,14 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 
 ## Payment model
 
-- The ledger's sole unit is integer USD micro-dollars. USDC and USDT are accepted only when configured with six decimals; their raw token amount maps one-to-one to USD micro-dollars.
+- The ledger's sole unit is integer USD micro-dollars. Built-in USDC and USDT maps cover Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon; token amounts are converted exactly to USD micro-dollars, including the 18-decimal BSC assets.
 - Midas never background-scans a chain. The client or integrating application submits one transaction hash; Midas verifies the specified transaction receipt and ERC-20 `Transfer` log against the user's dedicated address.
-- A confirmed deposit credits the USD ledger, then queues a two-step collection: the gas wallet funds native gas and the user's stored deposit key signs the ERC-20 transfer to the collection address.
-- Transfers are paired, immutable USD ledger entries. Withdrawals reserve the available USD balance and broadcast an ERC-20 transfer only when an enabled collection-wallet signer exists.
+- A confirmed deposit credits the USD ledger, then queues a two-step collection: the single custody wallet funds native gas and the user's stored deposit key signs the ERC-20 transfer back to that same custody address.
+- Transfers are paired, immutable USD ledger entries and use Linkit's username picker. Withdrawals reserve the available USD balance, require an approved same-chain address-book entry, and broadcast an ERC-20 transfer only when the custody signer exists.
 
 ## Trust and operational boundary
 
-- Midas is custodial. Dedicated-address keys and optional gas/collection private keys are persisted in SQLite but are never returned by an API. The service account is the only account permitted to read the database directory.
+- Midas is custodial. Dedicated-address keys and one custody private key are persisted in SQLite but are never returned by an API. The custody address is derived from its private key; the service account is the only account permitted to read the database directory.
 - Root configuration is protected by `app_meta.root_user_id`; changing it is not an application feature.
 - A transaction is never credited from a client-provided amount. Midas derives asset, recipient, and amount from the final on-chain receipt.
 
