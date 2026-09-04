@@ -37,66 +37,13 @@ jobs:
           python3 - <<'PY' > ssm-parameters.json
           import json, os
           sha = os.environ["DEPLOY_SHA"]
-          commands = [f'''set -eu
-          deploy_dir="{os.environ['DEPLOY_DIR']}"
-          data_dir="{os.environ['DATA_DIR']}"
-          release_dir="$deploy_dir/releases/{sha}"
-          archive="{os.environ['ARCHIVE_NAME']}"
-          metadata="{os.environ['METADATA_NAME']}"
-          release_base="https://github.com/No-Trade-No-Life/Midas/releases/download/latest"
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y caddy curl ca-certificates
-          mkdir -p "$release_dir" "$data_dir"
-          curl -fsS "$release_base/$archive" -o "/tmp/$archive"
-          curl -fsS "$release_base/$archive.sha256" -o "/tmp/$archive.sha256"
-          curl -fsS "$release_base/$metadata" -o "/tmp/$metadata"
-          (cd /tmp && sha256sum -c "$archive.sha256")
-          test "$(python3 -c 'import json; print(json.load(open("/tmp/{os.environ['METADATA_NAME']}"))["git_sha"])')" = "{sha}"
-          rm -rf "$release_dir"
-          mkdir -p "$release_dir"
-          tar -xzf "/tmp/$archive" -C "$release_dir" --strip-components=1
-          ln -sfn "$release_dir" "$deploy_dir/current"
-          cat > /etc/systemd/system/{os.environ['SERVICE_NAME']}.service <<'UNIT'
-          [Unit]
-          Description=Midas safe v1 skeleton
-          After=network-online.target
-          Wants=network-online.target
-          [Service]
-          Type=simple
-          WorkingDirectory=/opt/midas/current
-          Environment=MIDAS_ADDR=127.0.0.1:8787
-          Environment=MIDAS_HOME=/var/lib/midas
-          ExecStart=/opt/midas/current/midas
-          Restart=always
-          RestartSec=5
-          NoNewPrivileges=true
-          PrivateTmp=true
-          ProtectHome=true
-          ProtectSystem=strict
-          ReadWritePaths=/var/lib/midas /opt/midas
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-          cat > /etc/caddy/Caddyfile <<'CADDY'
-          midas.ntnl.io {{
-            encode zstd gzip
-            reverse_proxy 127.0.0.1:8787
-          }}
-          CADDY
-          systemctl daemon-reload
-          systemctl enable --now {os.environ['SERVICE_NAME']}
-          systemctl enable --now caddy
-          systemctl restart caddy
-          for attempt in $(seq 1 30); do
-            version="$(curl -fsS --max-time 2 http://127.0.0.1:8787/api/version || true)"
-            if [ -n "$version" ] && VERSION="$version" EXPECTED="{sha}" python3 -c 'import json,os; assert json.loads(os.environ["VERSION"])["git_sha"] == os.environ["EXPECTED"]'; then
-              curl -fsS --max-time 2 http://127.0.0.1:8787/api/health
-              rm -f "/tmp/$archive" "/tmp/$archive.sha256" "/tmp/$metadata"
-              exit 0
-            fi
-            sleep 1
-          done
-          exit 1''']
+          script_url = f"https://raw.githubusercontent.com/No-Trade-No-Life/Midas/{sha}/deploy/activate-release.sh"
+          commands = [
+            "set -eu",
+            f"curl -fsSL {script_url} -o /tmp/midas-activate-release.sh",
+            "chmod 700 /tmp/midas-activate-release.sh",
+            f"MIDAS_DEPLOY_SHA={sha} MIDAS_DEPLOY_DIR={os.environ['DEPLOY_DIR']} MIDAS_DATA_DIR={os.environ['DATA_DIR']} MIDAS_SERVICE_NAME={os.environ['SERVICE_NAME']} MIDAS_ARCHIVE_NAME={os.environ['ARCHIVE_NAME']} MIDAS_METADATA_NAME={os.environ['METADATA_NAME']} /tmp/midas-activate-release.sh",
+          ]
           print(json.dumps({"commands": commands}))
           PY
           command_id=$(aws ssm send-command \
