@@ -35,20 +35,20 @@ CREATE TABLE IF NOT EXISTS wallet_addresses (
   user_id TEXT NOT NULL REFERENCES users(id),
   chain_id INTEGER NOT NULL REFERENCES evm_networks(chain_id),
   address TEXT NOT NULL,
-  custody_status TEXT NOT NULL DEFAULT 'disabled' CHECK (custody_status IN ('disabled', 'configured')),
+  custody_status TEXT NOT NULL DEFAULT 'configured' CHECK (custody_status = 'configured'),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(chain_id, address),
   UNIQUE(user_id, chain_id)
 );
 
--- v1 intentionally never writes private material. This future custody envelope is nullable
--- so schema preparation never requires or synthesizes a real private key.
-CREATE TABLE IF NOT EXISTS wallet_key_envelopes (
+-- Midas is a custodial service. This table deliberately keeps the user deposit
+-- key separate from the public wallet-address record. It is never selected by
+-- a response handler and the database directory is readable only by the
+-- service account.
+CREATE TABLE IF NOT EXISTS wallet_private_keys (
   wallet_address_id TEXT PRIMARY KEY REFERENCES wallet_addresses(id) ON DELETE CASCADE,
-  encrypted_private_key BLOB,
-  key_version TEXT,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CHECK (encrypted_private_key IS NULL OR key_version IS NOT NULL)
+  private_key TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS ledger_entries (
@@ -69,3 +69,68 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 
 CREATE INDEX IF NOT EXISTS ledger_entries_user_created_idx
   ON ledger_entries(user_id, created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS payment_operations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('deposit', 'transfer', 'withdrawal')),
+  idempotency_key TEXT NOT NULL,
+  resource_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('accepted', 'submitted', 'completed', 'failed')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(user_id, kind, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS deposits (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  wallet_address_id TEXT NOT NULL REFERENCES wallet_addresses(id),
+  asset_id TEXT NOT NULL REFERENCES supported_assets(id),
+  ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  transaction_hash TEXT NOT NULL,
+  log_index INTEGER NOT NULL,
+  raw_amount TEXT NOT NULL,
+  sweep_status TEXT NOT NULL CHECK (sweep_status IN ('queued', 'submitted', 'swept', 'awaiting_configuration', 'failed')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(asset_id, transaction_hash, log_index)
+);
+
+CREATE TABLE IF NOT EXISTS deposit_sweeps (
+  id TEXT PRIMARY KEY,
+  deposit_id TEXT NOT NULL UNIQUE REFERENCES deposits(id) ON DELETE CASCADE,
+  gas_transaction_hash TEXT,
+  token_transaction_hash TEXT,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'submitted', 'swept', 'failed')),
+  error_message TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS internal_transfers (
+  id TEXT PRIMARY KEY,
+  sender_user_id TEXT NOT NULL REFERENCES users(id),
+  recipient_user_id TEXT NOT NULL REFERENCES users(id),
+  amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros > 0),
+  sender_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  recipient_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS withdrawals (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  asset_id TEXT NOT NULL REFERENCES supported_assets(id),
+  ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  destination_address TEXT NOT NULL,
+  amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros > 0),
+  transaction_hash TEXT,
+  status TEXT NOT NULL CHECK (status IN ('awaiting_signer', 'submitted', 'completed', 'failed')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS deposits_user_created_idx
+  ON deposits(user_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS withdrawals_user_created_idx
+  ON withdrawals(user_id, created_at DESC, id DESC);
