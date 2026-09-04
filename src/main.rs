@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use chrono::Utc;
 use ethers::{
@@ -35,12 +35,147 @@ abigen!(
 const AUTH_MINI_BASE_URL: &str = "https://auth.ntnl.io";
 const AUTH_MINI_AUDIENCE: &str = "midas.ntnl.io";
 const ROOT_USER_ID_KEY: &str = "root_user_id";
-const GAS_ACCOUNT_ADDRESS_KEY: &str = "evm_gas_account_address";
-const GAS_ACCOUNT_PRIVATE_KEY_KEY: &str = "evm_gas_account_private_key";
-const COLLECTION_WALLET_ADDRESS_KEY: &str = "evm_collection_wallet_address";
-const COLLECTION_WALLET_PRIVATE_KEY_KEY: &str = "evm_collection_wallet_private_key";
-const GAS_FUNDING_WEI_KEY: &str = "evm_gas_funding_wei";
+const CUSTODY_WALLET_ADDRESS_KEY: &str = "evm_custody_wallet_address";
+const CUSTODY_WALLET_PRIVATE_KEY_KEY: &str = "evm_custody_wallet_private_key";
+const LEGACY_GAS_ACCOUNT_PRIVATE_KEY_KEY: &str = "evm_gas_account_private_key";
+const LEGACY_COLLECTION_WALLET_PRIVATE_KEY_KEY: &str = "evm_collection_wallet_private_key";
 const DEFAULT_GAS_FUNDING_WEI: &str = "1000000000000000";
+
+#[derive(Clone, Copy)]
+struct BuiltinEvmNetwork {
+    chain_id: i64,
+    name: &'static str,
+    rpc_url: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct BuiltinAsset {
+    id: &'static str,
+    chain_id: i64,
+    symbol: &'static str,
+    contract_address: &'static str,
+    token_decimals: u8,
+}
+
+const BUILTIN_EVM_NETWORKS: [BuiltinEvmNetwork; 6] = [
+    BuiltinEvmNetwork {
+        chain_id: 1,
+        name: "Ethereum",
+        rpc_url: "https://ethereum-rpc.publicnode.com",
+    },
+    BuiltinEvmNetwork {
+        chain_id: 56,
+        name: "BNB Smart Chain",
+        rpc_url: "https://bsc-rpc.publicnode.com",
+    },
+    BuiltinEvmNetwork {
+        chain_id: 8453,
+        name: "Base",
+        rpc_url: "https://base-rpc.publicnode.com",
+    },
+    BuiltinEvmNetwork {
+        chain_id: 42161,
+        name: "Arbitrum One",
+        rpc_url: "https://arbitrum-one-rpc.publicnode.com",
+    },
+    BuiltinEvmNetwork {
+        chain_id: 10,
+        name: "OP Mainnet",
+        rpc_url: "https://optimism-rpc.publicnode.com",
+    },
+    BuiltinEvmNetwork {
+        chain_id: 137,
+        name: "Polygon",
+        rpc_url: "https://polygon-bor-rpc.publicnode.com",
+    },
+];
+
+const BUILTIN_ASSETS: [BuiltinAsset; 12] = [
+    BuiltinAsset {
+        id: "1-USDC",
+        chain_id: 1,
+        symbol: "USDC",
+        contract_address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "1-USDT",
+        chain_id: 1,
+        symbol: "USDT",
+        contract_address: "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "56-USDC",
+        chain_id: 56,
+        symbol: "USDC",
+        contract_address: "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+        token_decimals: 18,
+    },
+    BuiltinAsset {
+        id: "56-USDT",
+        chain_id: 56,
+        symbol: "USDT",
+        contract_address: "0x55d398326f99059ff775485246999027b3197955",
+        token_decimals: 18,
+    },
+    BuiltinAsset {
+        id: "8453-USDC",
+        chain_id: 8453,
+        symbol: "USDC",
+        contract_address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "8453-USDT",
+        chain_id: 8453,
+        symbol: "USDT",
+        contract_address: "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "42161-USDC",
+        chain_id: 42161,
+        symbol: "USDC",
+        contract_address: "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "42161-USDT",
+        chain_id: 42161,
+        symbol: "USDT",
+        contract_address: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "10-USDC",
+        chain_id: 10,
+        symbol: "USDC",
+        contract_address: "0x0b2c639c533813f4aa9d7837caf62653d097ff85",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "10-USDT",
+        chain_id: 10,
+        symbol: "USDT",
+        contract_address: "0x01bff41798a0bcf287b996046ca68b395dbc1071",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "137-USDC",
+        chain_id: 137,
+        symbol: "USDC",
+        contract_address: "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+        token_decimals: 6,
+    },
+    BuiltinAsset {
+        id: "137-USDT",
+        chain_id: 137,
+        symbol: "USDT",
+        contract_address: "0xc2132d05d31c914a87c6611c10748aeb04b58e8f",
+        token_decimals: 6,
+    },
+];
 
 #[derive(Clone)]
 struct AppState {
@@ -152,8 +287,6 @@ struct LedgerEntry {
 struct EvmNetwork {
     chain_id: i64,
     name: String,
-    rpc_url: String,
-    enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -162,6 +295,7 @@ struct SupportedAsset {
     chain_id: i64,
     symbol: String,
     contract_address: String,
+    token_decimals: u8,
     enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     network_name: Option<String>,
@@ -169,25 +303,15 @@ struct SupportedAsset {
 
 #[derive(Serialize)]
 struct EvmConfig {
-    gas_account_address: Option<String>,
-    gas_account_private_key_configured: bool,
-    collection_wallet_address: Option<String>,
-    collection_wallet_private_key_configured: bool,
-    gas_funding_wei: String,
+    custody_wallet_address: Option<String>,
+    custody_wallet_private_key_configured: bool,
     networks: Vec<EvmNetwork>,
     assets: Vec<SupportedAsset>,
 }
 
 #[derive(Deserialize)]
 struct EvmConfigInput {
-    gas_account_private_key: Option<String>,
-    collection_wallet_address: Option<String>,
-    collection_wallet_private_key: Option<String>,
-    gas_funding_wei: Option<String>,
-    #[serde(default)]
-    networks: Vec<EvmNetwork>,
-    #[serde(default)]
-    assets: Vec<SupportedAsset>,
+    custody_wallet_private_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -239,7 +363,7 @@ struct TransferResponse {
 #[derive(Deserialize)]
 struct WithdrawalRequest {
     asset_id: String,
-    destination_address: String,
+    address_book_entry_id: String,
     amount_usd_micros: i64,
     note: Option<String>,
 }
@@ -249,6 +373,8 @@ struct WithdrawalResponse {
     id: String,
     asset_symbol: String,
     destination_address: String,
+    address_book_entry_id: Option<String>,
+    destination_label: Option<String>,
     amount_usd_micros: i64,
     amount_usd: String,
     transaction_hash: Option<String>,
@@ -262,6 +388,7 @@ struct DepositTarget {
     symbol: String,
     contract_address: String,
     rpc_url: String,
+    token_decimals: u8,
 }
 
 struct VerifiedDeposit {
@@ -277,8 +404,32 @@ struct WithdrawalTarget {
     chain_id: i64,
     destination_address: String,
     amount_usd_micros: i64,
+    token_decimals: u8,
     transaction_hash: Option<String>,
     status: String,
+}
+
+#[derive(Serialize)]
+struct AddressBookEntry {
+    id: String,
+    chain_id: i64,
+    chain_name: String,
+    label: String,
+    address: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct AddressBookEntryInput {
+    chain_id: i64,
+    label: String,
+    address: String,
+}
+
+#[derive(Deserialize)]
+struct AddressBookEntryUpdate {
+    label: String,
 }
 
 struct LedgerInsert<'a> {
@@ -349,6 +500,14 @@ fn app(state: AppState) -> Router {
         )
         .route("/deposits/confirm", post(confirm_deposit))
         .route("/transfers", post(create_transfer))
+        .route(
+            "/address-book/me",
+            get(my_address_book).post(create_address_book_entry),
+        )
+        .route(
+            "/address-book/me/:id",
+            put(update_address_book_entry).delete(delete_address_book_entry),
+        )
         .route("/withdrawals", get(my_withdrawals).post(create_withdrawal))
         .route("/withdrawals/:id/finalize", post(finalize_withdrawal))
         .route(
@@ -398,7 +557,7 @@ async fn openapi_yaml() -> ([(axum::http::HeaderName, &'static str); 1], &'stati
 async fn auth_config() -> Json<AuthConfig> {
     Json(AuthConfig {
         auth_mini_base_url: AUTH_MINI_BASE_URL,
-        audiences: vec![AUTH_MINI_AUDIENCE],
+        audiences: vec![AUTH_MINI_AUDIENCE, "linkit.ntnl.io"],
         linkit_base_url: "https://linkit.ntnl.io",
     })
 }
@@ -442,24 +601,7 @@ async fn list_assets(
     headers: HeaderMap,
 ) -> Result<Json<Vec<SupportedAsset>>, ApiError> {
     require_initialized_user(&state, &headers).await?;
-    let rows = sqlx::query(
-        "SELECT a.id,a.chain_id,a.symbol,a.contract_address,a.enabled,n.name FROM supported_assets a JOIN evm_networks n ON n.chain_id=a.chain_id ORDER BY a.chain_id,a.symbol",
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(db_error)?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|row| SupportedAsset {
-                id: row.get(0),
-                chain_id: row.get(1),
-                symbol: row.get(2),
-                contract_address: row.get(3),
-                enabled: row.get::<i64, _>(4) == 1,
-                network_name: Some(row.get(5)),
-            })
-            .collect(),
-    ))
+    Ok(Json(builtin_assets()))
 }
 
 async fn my_balance(
@@ -549,14 +691,8 @@ async fn provision_wallet_address(
             created_at: row.get(2),
         }));
     }
-    let enabled: Option<i64> =
-        sqlx::query_scalar("SELECT enabled FROM evm_networks WHERE chain_id=?1")
-            .bind(input.chain_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(db_error)?;
-    if enabled != Some(1) {
-        return Err(ApiError::invalid("the EVM network is not enabled"));
+    if builtin_network(input.chain_id).is_none() {
+        return Err(ApiError::invalid("the EVM network is not supported"));
     }
     let private_key = LocalWallet::new(&mut thread_rng()).with_chain_id(input.chain_id as u64);
     let address = format!("{:#x}", private_key.address());
@@ -795,6 +931,121 @@ async fn create_transfer(
     Ok(Json(read_transfer_response(&state.db, &transfer_id).await?))
 }
 
+async fn my_address_book(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AddressBookEntry>>, ApiError> {
+    let user_id = require_initialized_user(&state, &headers).await?;
+    let rows = sqlx::query("SELECT id,chain_id,label,address,created_at,updated_at FROM address_book_entries WHERE user_id=?1 ORDER BY chain_id,label COLLATE NOCASE,id")
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(db_error)?;
+    rows.into_iter()
+        .map(address_book_entry)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Json)
+}
+
+async fn create_address_book_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AddressBookEntryInput>,
+) -> Result<Json<AddressBookEntry>, ApiError> {
+    let user_id = require_initialized_user(&state, &headers).await?;
+    let network = builtin_network(input.chain_id)
+        .ok_or_else(|| ApiError::invalid("the address book network is not supported"))?;
+    let label = address_book_label(&input.label)?;
+    let address = format!("{:#x}", parse_address(&input.address, "address")?);
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let _write = state.write_lock.lock().await;
+    let created = sqlx::query("INSERT OR IGNORE INTO address_book_entries(id,user_id,chain_id,label,address,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)")
+        .bind(&id)
+        .bind(&user_id)
+        .bind(network.chain_id)
+        .bind(&label)
+        .bind(&address)
+        .bind(&now)
+        .execute(&state.db)
+        .await
+        .map_err(db_error)?;
+    if created.rows_affected() == 0 {
+        return Err(ApiError::conflict(
+            "this address is already in the address book for the selected network",
+        ));
+    }
+    Ok(Json(AddressBookEntry {
+        id,
+        chain_id: network.chain_id,
+        chain_name: network.name.to_string(),
+        label,
+        address,
+        created_at: now.clone(),
+        updated_at: now,
+    }))
+}
+
+async fn update_address_book_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<AddressBookEntryUpdate>,
+) -> Result<Json<AddressBookEntry>, ApiError> {
+    let user_id = require_initialized_user(&state, &headers).await?;
+    let label = address_book_label(&input.label)?;
+    let now = Utc::now().to_rfc3339();
+    let _write = state.write_lock.lock().await;
+    let updated = sqlx::query(
+        "UPDATE address_book_entries SET label=?1,updated_at=?2 WHERE id=?3 AND user_id=?4",
+    )
+    .bind(&label)
+    .bind(&now)
+    .bind(&id)
+    .bind(&user_id)
+    .execute(&state.db)
+    .await
+    .map_err(db_error)?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::invalid("address book entry does not exist"));
+    }
+    read_address_book_entry(&state.db, &user_id, &id)
+        .await
+        .map(Json)
+}
+
+async fn delete_address_book_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = require_initialized_user(&state, &headers).await?;
+    let _write = state.write_lock.lock().await;
+    let used: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM withdrawals WHERE user_id=?1 AND address_book_entry_id=?2",
+    )
+    .bind(&user_id)
+    .bind(&id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(db_error)?;
+    if used > 0 {
+        return Err(ApiError::conflict(
+            "an address used by a withdrawal cannot be removed",
+        ));
+    }
+    let deleted = sqlx::query("DELETE FROM address_book_entries WHERE id=?1 AND user_id=?2")
+        .bind(&id)
+        .bind(&user_id)
+        .execute(&state.db)
+        .await
+        .map_err(db_error)?;
+    if deleted.rows_affected() == 0 {
+        return Err(ApiError::invalid("address book entry does not exist"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn create_withdrawal(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -807,7 +1058,15 @@ async fn create_withdrawal(
             "withdrawal amount must be greater than zero",
         ));
     }
-    let destination = parse_address(&input.destination_address, "destination_address")?;
+    let asset = builtin_asset(&input.asset_id)
+        .ok_or_else(|| ApiError::invalid("the withdrawal asset is not supported"))?;
+    let address_book_entry =
+        read_address_book_entry(&state.db, &user_id, &input.address_book_entry_id).await?;
+    if address_book_entry.chain_id != asset.chain_id {
+        return Err(ApiError::invalid(
+            "the withdrawal asset and address book entry must use the same EVM network",
+        ));
+    }
     let _write = state.write_lock.lock().await;
     if let Some(existing) =
         operation_resource(&state.db, &user_id, "withdrawal", &idempotency_key).await?
@@ -818,15 +1077,6 @@ async fn create_withdrawal(
         return Err(ApiError::conflict(
             "the available USD balance is insufficient",
         ));
-    }
-    let asset_exists: Option<i64> =
-        sqlx::query_scalar("SELECT enabled FROM supported_assets WHERE id=?1")
-            .bind(&input.asset_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(db_error)?;
-    if asset_exists != Some(1) {
-        return Err(ApiError::invalid("the withdrawal asset is not enabled"));
     }
     let withdrawal_id = Uuid::new_v4().to_string();
     let ledger_id = Uuid::new_v4().to_string();
@@ -850,12 +1100,13 @@ async fn create_withdrawal(
         },
     )
     .await?;
-    sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'awaiting_signer',?7,?7)")
+    sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,address_book_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'awaiting_signer',?8,?8)")
         .bind(&withdrawal_id)
         .bind(&user_id)
         .bind(&input.asset_id)
         .bind(&ledger_id)
-        .bind(format!("{destination:#x}"))
+        .bind(&address_book_entry.id)
+        .bind(&address_book_entry.address)
         .bind(input.amount_usd_micros)
         .bind(&now)
         .execute(&mut *tx)
@@ -957,104 +1208,21 @@ async fn write_evm_config(
     Json(input): Json<EvmConfigInput>,
 ) -> Result<Json<EvmConfig>, ApiError> {
     require_root(&state, &headers).await?;
-    if let Some(gas_funding_wei) = input.gas_funding_wei.as_deref() {
-        U256::from_dec_str(gas_funding_wei)
-            .map_err(|_| ApiError::invalid("gas_funding_wei must be a decimal wei amount"))?;
-    }
-    for network in &input.networks {
-        if network.chain_id <= 0
-            || network.name.trim().is_empty()
-            || !network.rpc_url.starts_with("http")
-        {
-            return Err(ApiError::invalid(
-                "each network needs a positive chain_id, name, and HTTP(S) RPC URL",
-            ));
-        }
-    }
-    for asset in &input.assets {
-        if asset.symbol != "USDC" && asset.symbol != "USDT" {
-            return Err(ApiError::invalid("only USDC and USDT are supported"));
-        }
-        parse_address(&asset.contract_address, "asset contract_address")?;
-    }
-    let gas_address = input
-        .gas_account_private_key
+    let custody_address = input
+        .custody_wallet_private_key
         .as_deref()
         .map(|key| parse_wallet(key, 1).map(|wallet| format!("{:#x}", wallet.address())))
         .transpose()?;
-    let collection_key_address = input
-        .collection_wallet_private_key
-        .as_deref()
-        .map(|key| parse_wallet(key, 1).map(|wallet| format!("{:#x}", wallet.address())))
-        .transpose()?;
-    if let (Some(configured), Some(derived)) = (
-        input.collection_wallet_address.as_deref(),
-        collection_key_address.as_deref(),
-    ) && parse_address(configured, "collection_wallet_address")?
-        != parse_address(derived, "collection_wallet_private_key")?
-    {
-        return Err(ApiError::invalid(
-            "collection_wallet_private_key does not match collection_wallet_address",
-        ));
-    }
     let _write = state.write_lock.lock().await;
     let mut tx = state.db.begin().await.map_err(db_error)?;
-    if let Some(key) = input.gas_account_private_key.as_deref() {
-        set_meta_tx(&mut tx, GAS_ACCOUNT_PRIVATE_KEY_KEY, key).await?;
+    if let Some(key) = input.custody_wallet_private_key.as_deref() {
+        set_meta_tx(&mut tx, CUSTODY_WALLET_PRIVATE_KEY_KEY, key).await?;
         set_meta_tx(
             &mut tx,
-            GAS_ACCOUNT_ADDRESS_KEY,
-            gas_address.as_deref().expect("derived gas address"),
+            CUSTODY_WALLET_ADDRESS_KEY,
+            custody_address.as_deref().expect("derived custody address"),
         )
         .await?;
-    }
-    if let Some(address) = input.collection_wallet_address.as_deref() {
-        set_meta_tx(
-            &mut tx,
-            COLLECTION_WALLET_ADDRESS_KEY,
-            &format!(
-                "{:#x}",
-                parse_address(address, "collection_wallet_address")?
-            ),
-        )
-        .await?;
-    }
-    if let Some(key) = input.collection_wallet_private_key.as_deref() {
-        set_meta_tx(&mut tx, COLLECTION_WALLET_PRIVATE_KEY_KEY, key).await?;
-        if input.collection_wallet_address.is_none() {
-            set_meta_tx(
-                &mut tx,
-                COLLECTION_WALLET_ADDRESS_KEY,
-                collection_key_address
-                    .as_deref()
-                    .expect("derived collection address"),
-            )
-            .await?;
-        }
-    }
-    if let Some(value) = input.gas_funding_wei.as_deref() {
-        set_meta_tx(&mut tx, GAS_FUNDING_WEI_KEY, value).await?;
-    }
-    for network in &input.networks {
-        sqlx::query("INSERT INTO evm_networks(chain_id,name,rpc_url,enabled) VALUES(?1,?2,?3,?4) ON CONFLICT(chain_id) DO UPDATE SET name=excluded.name,rpc_url=excluded.rpc_url,enabled=excluded.enabled")
-            .bind(network.chain_id)
-            .bind(&network.name)
-            .bind(&network.rpc_url)
-            .bind(network.enabled as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
-    }
-    for asset in &input.assets {
-        sqlx::query("INSERT INTO supported_assets(id,chain_id,symbol,contract_address,usd_scale,enabled) VALUES(?1,?2,?3,?4,6,?5) ON CONFLICT(id) DO UPDATE SET chain_id=excluded.chain_id,symbol=excluded.symbol,contract_address=excluded.contract_address,enabled=excluded.enabled")
-            .bind(&asset.id)
-            .bind(asset.chain_id)
-            .bind(&asset.symbol)
-            .bind(format!("{:#x}", parse_address(&asset.contract_address, "asset contract_address")?))
-            .bind(asset.enabled as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
     }
     tx.commit().await.map_err(db_error)?;
     Ok(Json(load_evm_config(&state.db).await?))
@@ -1083,33 +1251,34 @@ async fn submit_sweep(state: &AppState, deposit_id: &str) -> Result<(), ApiError
     let contract_address: String = row.get(4);
     let rpc_url: String = row.get(5);
     let chain_id: i64 = row.get(6);
-    let gas_private_key = meta(&state.db, GAS_ACCOUNT_PRIVATE_KEY_KEY)
+    let custody_private_key = meta(&state.db, CUSTODY_WALLET_PRIVATE_KEY_KEY)
         .await
         .map_err(db_error)?;
-    let collection_address = meta(&state.db, COLLECTION_WALLET_ADDRESS_KEY)
+    let custody_address = meta(&state.db, CUSTODY_WALLET_ADDRESS_KEY)
         .await
         .map_err(db_error)?;
-    let Some(gas_private_key) = gas_private_key else {
+    let Some(custody_private_key) = custody_private_key else {
         mark_sweep_configuration(state, deposit_id).await?;
         return Ok(());
     };
-    let Some(collection_address) = collection_address else {
+    let Some(custody_address) = custody_address else {
         mark_sweep_configuration(state, deposit_id).await?;
         return Ok(());
     };
-    let gas_funding_wei = meta(&state.db, GAS_FUNDING_WEI_KEY)
-        .await
-        .map_err(db_error)?
-        .unwrap_or_else(|| DEFAULT_GAS_FUNDING_WEI.to_string());
     let provider = rpc_provider(&rpc_url)?;
-    let gas_wallet = parse_wallet(&gas_private_key, chain_id)?;
-    let gas_client = Arc::new(SignerMiddleware::new(provider.clone(), gas_wallet));
+    let custody_wallet = parse_wallet(&custody_private_key, chain_id)?;
+    if custody_wallet.address() != parse_address(&custody_address, "configured custody wallet")? {
+        return Err(ApiError::invalid(
+            "custody wallet private key does not match its configured address",
+        ));
+    }
+    let gas_client = Arc::new(SignerMiddleware::new(provider.clone(), custody_wallet));
     let gas_pending = gas_client
         .send_transaction(
             TransactionRequest::pay(
                 parse_address(&deposit_address, "stored deposit address")?,
-                U256::from_dec_str(&gas_funding_wei)
-                    .map_err(|_| ApiError::invalid("configured gas funding amount is invalid"))?,
+                U256::from_dec_str(DEFAULT_GAS_FUNDING_WEI)
+                    .expect("default gas funding amount is valid"),
             ),
             None,
         )
@@ -1144,7 +1313,7 @@ async fn submit_sweep(state: &AppState, deposit_id: &str) -> Result<(), ApiError
         source_client,
     );
     let token_call = contract.transfer(
-        parse_address(&collection_address, "configured collection wallet")?,
+        parse_address(&custody_address, "configured custody wallet")?,
         U256::from_dec_str(&raw_amount)
             .map_err(|_| ApiError::invalid("stored deposit amount is invalid"))?,
     );
@@ -1178,7 +1347,7 @@ async fn mark_sweep_configuration(state: &AppState, deposit_id: &str) -> Result<
         .execute(&state.db)
         .await
         .map_err(db_error)?;
-    sqlx::query("UPDATE deposit_sweeps SET status='queued',error_message='Gas wallet or collection wallet is not configured',updated_at=?1 WHERE deposit_id=?2")
+    sqlx::query("UPDATE deposit_sweeps SET status='queued',error_message='Custody wallet is not configured',updated_at=?1 WHERE deposit_id=?2")
         .bind(now)
         .bind(deposit_id)
         .execute(&state.db)
@@ -1192,21 +1361,21 @@ async fn submit_withdrawal(state: &AppState, withdrawal_id: &str) -> Result<(), 
     if target.status != "awaiting_signer" {
         return Ok(());
     }
-    let collection_private_key = meta(&state.db, COLLECTION_WALLET_PRIVATE_KEY_KEY)
+    let custody_private_key = meta(&state.db, CUSTODY_WALLET_PRIVATE_KEY_KEY)
         .await
         .map_err(db_error)?;
-    let Some(collection_private_key) = collection_private_key else {
+    let Some(custody_private_key) = custody_private_key else {
         return Ok(());
     };
-    let collection_address = meta(&state.db, COLLECTION_WALLET_ADDRESS_KEY)
+    let custody_address = meta(&state.db, CUSTODY_WALLET_ADDRESS_KEY)
         .await
         .map_err(db_error)?
-        .ok_or_else(|| ApiError::conflict("collection wallet address is not configured"))?;
+        .ok_or_else(|| ApiError::conflict("custody wallet address is not configured"))?;
     let provider = rpc_provider(&target.rpc_url)?;
-    let wallet = parse_wallet(&collection_private_key, target.chain_id)?;
-    if wallet.address() != parse_address(&collection_address, "configured collection wallet")? {
+    let wallet = parse_wallet(&custody_private_key, target.chain_id)?;
+    if wallet.address() != parse_address(&custody_address, "configured custody wallet")? {
         return Err(ApiError::invalid(
-            "collection wallet private key does not match its configured address",
+            "custody wallet private key does not match its configured address",
         ));
     }
     let client = Arc::new(SignerMiddleware::new(provider, wallet));
@@ -1216,7 +1385,7 @@ async fn submit_withdrawal(state: &AppState, withdrawal_id: &str) -> Result<(), 
     );
     let transfer_call = contract.transfer(
         parse_address(&target.destination_address, "stored withdrawal destination")?,
-        U256::from(target.amount_usd_micros as u64),
+        usd_micros_to_token_units(target.amount_usd_micros, target.token_decimals)?,
     );
     let pending = transfer_call.send().await.map_err(chain_error)?;
     let now = Utc::now().to_rfc3339();
@@ -1238,10 +1407,16 @@ async fn load_deposit_target(
     user_id: &str,
     input: &DepositRequest,
 ) -> Result<DepositTarget, ApiError> {
-    let row = sqlx::query("SELECT w.id,w.address,a.id,a.symbol,a.contract_address,n.rpc_url FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id JOIN supported_assets a ON a.id=?3 AND a.chain_id=w.chain_id JOIN evm_networks n ON n.chain_id=w.chain_id WHERE w.user_id=?1 AND w.chain_id=?2 AND a.enabled=1 AND n.enabled=1")
+    let asset = builtin_asset(&input.asset_id)
+        .ok_or_else(|| ApiError::invalid("the deposit asset is not supported"))?;
+    if input.chain_id != asset.chain_id {
+        return Err(ApiError::invalid(
+            "the deposit asset does not belong to the selected EVM network",
+        ));
+    }
+    let row = sqlx::query("SELECT w.id,w.address FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id WHERE w.user_id=?1 AND w.chain_id=?2")
         .bind(user_id)
         .bind(input.chain_id)
-        .bind(&input.asset_id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
@@ -1249,10 +1424,14 @@ async fn load_deposit_target(
     Ok(DepositTarget {
         wallet_id: row.get(0),
         address: row.get(1),
-        asset_id: row.get(2),
-        symbol: row.get(3),
-        contract_address: row.get(4),
-        rpc_url: row.get(5),
+        asset_id: asset.id.to_string(),
+        symbol: asset.symbol.to_string(),
+        contract_address: asset.contract_address.to_string(),
+        rpc_url: builtin_network(asset.chain_id)
+            .expect("builtin asset always has a network")
+            .rpc_url
+            .to_string(),
+        token_decimals: asset.token_decimals,
     })
 }
 
@@ -1281,13 +1460,9 @@ async fn verify_deposit_receipt(
             continue;
         }
         let amount = U256::from_big_endian(log.data.0.as_ref());
-        if amount.is_zero() || amount > U256::from(i64::MAX as u64) {
-            return Err(ApiError::invalid(
-                "the confirmed token amount is outside Midas's USD ledger range",
-            ));
-        }
+        let amount_usd_micros = token_units_to_usd_micros(amount, target.token_decimals)?;
         return Ok(VerifiedDeposit {
-            amount_usd_micros: amount.as_u64() as i64,
+            amount_usd_micros,
             raw_amount: amount.to_string(),
             transaction_hash: format!("{transaction_hash:#x}"),
             log_index: log_index as i64,
@@ -1340,21 +1515,23 @@ async fn read_withdrawal_response(
     db: &SqlitePool,
     id: &str,
 ) -> Result<WithdrawalResponse, ApiError> {
-    let row = sqlx::query("SELECT w.id,a.symbol,w.destination_address,w.amount_usd_micros,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id WHERE w.id=?1")
+    let row = sqlx::query("SELECT w.id,a.symbol,w.destination_address,w.address_book_entry_id,b.label,w.amount_usd_micros,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id LEFT JOIN address_book_entries b ON b.id=w.address_book_entry_id WHERE w.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
         .ok_or_else(|| ApiError::invalid("withdrawal does not exist"))?;
-    let amount_usd_micros: i64 = row.get(3);
+    let amount_usd_micros: i64 = row.get(5);
     Ok(WithdrawalResponse {
         id: row.get(0),
         asset_symbol: row.get(1),
         destination_address: row.get(2),
+        address_book_entry_id: row.get(3),
+        destination_label: row.get(4),
         amount_usd_micros,
         amount_usd: format_usd(amount_usd_micros),
-        transaction_hash: row.get(4),
-        status: row.get(5),
+        transaction_hash: row.get(6),
+        status: row.get(7),
     })
 }
 
@@ -1363,7 +1540,7 @@ async fn load_withdrawal_target(
     id: &str,
     user_id: Option<&str>,
 ) -> Result<WithdrawalTarget, ApiError> {
-    let row = sqlx::query("SELECT a.contract_address,n.rpc_url,n.chain_id,w.destination_address,w.amount_usd_micros,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE w.id=?1")
+    let row = sqlx::query("SELECT a.contract_address,n.rpc_url,n.chain_id,w.destination_address,w.amount_usd_micros,a.token_decimals,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE w.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
@@ -1385,58 +1562,129 @@ async fn load_withdrawal_target(
         chain_id: row.get(2),
         destination_address: row.get(3),
         amount_usd_micros: row.get(4),
-        transaction_hash: row.get(5),
-        status: row.get(6),
+        token_decimals: row.get::<i64, _>(5) as u8,
+        transaction_hash: row.get(6),
+        status: row.get(7),
     })
 }
 
 async fn load_evm_config(db: &SqlitePool) -> Result<EvmConfig, ApiError> {
-    let network_rows =
-        sqlx::query("SELECT chain_id,name,rpc_url,enabled FROM evm_networks ORDER BY chain_id")
-            .fetch_all(db)
-            .await
-            .map_err(db_error)?;
-    let asset_rows = sqlx::query("SELECT id,chain_id,symbol,contract_address,enabled FROM supported_assets ORDER BY chain_id,symbol")
-        .fetch_all(db)
-        .await
-        .map_err(db_error)?;
     Ok(EvmConfig {
-        gas_account_address: meta(db, GAS_ACCOUNT_ADDRESS_KEY).await.map_err(db_error)?,
-        gas_account_private_key_configured: meta(db, GAS_ACCOUNT_PRIVATE_KEY_KEY)
-            .await
-            .map_err(db_error)?
-            .is_some(),
-        collection_wallet_address: meta(db, COLLECTION_WALLET_ADDRESS_KEY)
+        custody_wallet_address: meta(db, CUSTODY_WALLET_ADDRESS_KEY)
             .await
             .map_err(db_error)?,
-        collection_wallet_private_key_configured: meta(db, COLLECTION_WALLET_PRIVATE_KEY_KEY)
+        custody_wallet_private_key_configured: meta(db, CUSTODY_WALLET_PRIVATE_KEY_KEY)
             .await
             .map_err(db_error)?
             .is_some(),
-        gas_funding_wei: meta(db, GAS_FUNDING_WEI_KEY)
-            .await
-            .map_err(db_error)?
-            .unwrap_or_else(|| DEFAULT_GAS_FUNDING_WEI.to_string()),
-        networks: network_rows
-            .into_iter()
-            .map(|row| EvmNetwork {
-                chain_id: row.get(0),
-                name: row.get(1),
-                rpc_url: row.get(2),
-                enabled: row.get::<i64, _>(3) == 1,
-            })
-            .collect(),
-        assets: asset_rows
-            .into_iter()
-            .map(|row| SupportedAsset {
-                id: row.get(0),
-                chain_id: row.get(1),
-                symbol: row.get(2),
-                contract_address: row.get(3),
-                enabled: row.get::<i64, _>(4) == 1,
-                network_name: None,
-            })
-            .collect(),
+        networks: builtin_networks(),
+        assets: builtin_assets(),
+    })
+}
+
+fn builtin_network(chain_id: i64) -> Option<BuiltinEvmNetwork> {
+    BUILTIN_EVM_NETWORKS
+        .iter()
+        .copied()
+        .find(|network| network.chain_id == chain_id)
+}
+
+fn builtin_asset(id: &str) -> Option<BuiltinAsset> {
+    BUILTIN_ASSETS.iter().copied().find(|asset| asset.id == id)
+}
+
+fn builtin_networks() -> Vec<EvmNetwork> {
+    BUILTIN_EVM_NETWORKS
+        .iter()
+        .map(|network| EvmNetwork {
+            chain_id: network.chain_id,
+            name: network.name.to_string(),
+        })
+        .collect()
+}
+
+fn builtin_assets() -> Vec<SupportedAsset> {
+    BUILTIN_ASSETS
+        .iter()
+        .map(|asset| SupportedAsset {
+            id: asset.id.to_string(),
+            chain_id: asset.chain_id,
+            symbol: asset.symbol.to_string(),
+            contract_address: asset.contract_address.to_string(),
+            token_decimals: asset.token_decimals,
+            enabled: true,
+            network_name: Some(
+                builtin_network(asset.chain_id)
+                    .expect("builtin asset always has a network")
+                    .name
+                    .to_string(),
+            ),
+        })
+        .collect()
+}
+
+fn token_units_to_usd_micros(amount: U256, token_decimals: u8) -> Result<i64, ApiError> {
+    let scale = U256::exp10((token_decimals - 6) as usize);
+    if amount.is_zero() || amount % scale != U256::zero() {
+        return Err(ApiError::invalid(
+            "the confirmed token amount must be a positive whole USD micro amount",
+        ));
+    }
+    let micros = amount / scale;
+    if micros > U256::from(i64::MAX as u64) {
+        return Err(ApiError::invalid(
+            "the confirmed token amount is outside Midas's USD ledger range",
+        ));
+    }
+    Ok(micros.as_u64() as i64)
+}
+
+fn usd_micros_to_token_units(value: i64, token_decimals: u8) -> Result<U256, ApiError> {
+    if value <= 0 {
+        return Err(ApiError::invalid(
+            "withdrawal amount must be greater than zero",
+        ));
+    }
+    Ok(U256::from(value as u64) * U256::exp10((token_decimals - 6) as usize))
+}
+
+fn address_book_label(value: &str) -> Result<String, ApiError> {
+    let label = value.trim();
+    if label.is_empty() || label.chars().count() > 80 || label.chars().any(char::is_control) {
+        return Err(ApiError::invalid(
+            "address book label must contain 1 to 80 visible characters",
+        ));
+    }
+    Ok(label.to_string())
+}
+
+async fn read_address_book_entry(
+    db: &SqlitePool,
+    user_id: &str,
+    id: &str,
+) -> Result<AddressBookEntry, ApiError> {
+    let row = sqlx::query("SELECT id,chain_id,label,address,created_at,updated_at FROM address_book_entries WHERE id=?1 AND user_id=?2")
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::invalid("address book entry does not exist"))?;
+    address_book_entry(row)
+}
+
+fn address_book_entry(row: sqlx::sqlite::SqliteRow) -> Result<AddressBookEntry, ApiError> {
+    let chain_id: i64 = row.get(1);
+    let network = builtin_network(chain_id)
+        .ok_or_else(|| ApiError::invalid("address book entry uses an unsupported EVM network"))?;
+    Ok(AddressBookEntry {
+        id: row.get(0),
+        chain_id,
+        chain_name: network.name.to_string(),
+        label: row.get(2),
+        address: row.get(3),
+        created_at: row.get(4),
+        updated_at: row.get(5),
     })
 }
 
@@ -1654,6 +1902,78 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
     {
         sqlx::query(statement).execute(db).await?;
     }
+    if !table_has_column(db, "supported_assets", "token_decimals").await? {
+        sqlx::query(
+            "ALTER TABLE supported_assets ADD COLUMN token_decimals INTEGER NOT NULL DEFAULT 6",
+        )
+        .execute(db)
+        .await?;
+    }
+    if !table_has_column(db, "withdrawals", "address_book_entry_id").await? {
+        sqlx::query("ALTER TABLE withdrawals ADD COLUMN address_book_entry_id TEXT REFERENCES address_book_entries(id)")
+            .execute(db)
+            .await?;
+    }
+    seed_builtin_evm(db).await?;
+    migrate_legacy_custody_wallet(db).await?;
+    Ok(())
+}
+
+async fn table_has_column(db: &SqlitePool, table: &str, column: &str) -> anyhow::Result<bool> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(db)
+        .await?;
+    Ok(rows
+        .iter()
+        .any(|row| row.get::<String, _>("name") == column))
+}
+
+async fn seed_builtin_evm(db: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query("UPDATE supported_assets SET enabled=0")
+        .execute(db)
+        .await?;
+    sqlx::query("UPDATE evm_networks SET enabled=0")
+        .execute(db)
+        .await?;
+    for network in BUILTIN_EVM_NETWORKS {
+        sqlx::query("INSERT INTO evm_networks(chain_id,name,rpc_url,enabled) VALUES(?1,?2,?3,1) ON CONFLICT(chain_id) DO UPDATE SET name=excluded.name,rpc_url=excluded.rpc_url,enabled=1")
+            .bind(network.chain_id)
+            .bind(network.name)
+            .bind(network.rpc_url)
+            .execute(db)
+            .await?;
+    }
+    for asset in BUILTIN_ASSETS {
+        sqlx::query("INSERT INTO supported_assets(id,chain_id,symbol,contract_address,token_decimals,enabled) VALUES(?1,?2,?3,?4,?5,1) ON CONFLICT(id) DO UPDATE SET chain_id=excluded.chain_id,symbol=excluded.symbol,contract_address=excluded.contract_address,token_decimals=excluded.token_decimals,enabled=1")
+            .bind(asset.id)
+            .bind(asset.chain_id)
+            .bind(asset.symbol)
+            .bind(asset.contract_address)
+            .bind(asset.token_decimals as i64)
+            .execute(db)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn migrate_legacy_custody_wallet(db: &SqlitePool) -> anyhow::Result<()> {
+    if meta(db, CUSTODY_WALLET_PRIVATE_KEY_KEY).await?.is_some() {
+        return Ok(());
+    }
+    let legacy_key = meta(db, LEGACY_COLLECTION_WALLET_PRIVATE_KEY_KEY)
+        .await?
+        .or(meta(db, LEGACY_GAS_ACCOUNT_PRIVATE_KEY_KEY).await?);
+    let Some(legacy_key) = legacy_key else {
+        return Ok(());
+    };
+    let wallet = legacy_key.parse::<LocalWallet>()?;
+    set_meta(db, CUSTODY_WALLET_PRIVATE_KEY_KEY, &legacy_key).await?;
+    set_meta(
+        db,
+        CUSTODY_WALLET_ADDRESS_KEY,
+        &format!("{:#x}", wallet.address()),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1691,6 +2011,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(key_table, "wallet_private_keys");
+        let address_book_table: String = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='address_book_entries'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(address_book_table, "address_book_entries");
+        let builtin_assets: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM supported_assets WHERE enabled=1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(builtin_assets, 12);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1704,6 +2037,78 @@ mod tests {
     fn evm_private_keys_generate_addresses() {
         let wallet = LocalWallet::new(&mut thread_rng());
         assert!(format!("{:#x}", wallet.address()).starts_with("0x"));
+    }
+
+    #[test]
+    fn builtin_evm_assets_cover_common_networks_with_exact_usd_scaling() {
+        assert_eq!(BUILTIN_EVM_NETWORKS.len(), 6);
+        assert_eq!(BUILTIN_ASSETS.len(), 12);
+        assert_eq!(builtin_asset("1-USDC").unwrap().token_decimals, 6);
+        assert_eq!(builtin_asset("56-USDC").unwrap().token_decimals, 18);
+        assert_eq!(builtin_asset("8453-USDT").unwrap().chain_id, 8453);
+        assert_eq!(
+            token_units_to_usd_micros(U256::exp10(18), 18).unwrap(),
+            1_000_000
+        );
+        assert_eq!(
+            usd_micros_to_token_units(1_000_000, 18).unwrap(),
+            U256::exp10(18)
+        );
+        assert!(token_units_to_usd_micros(U256::from(1_u64), 18).is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_custody_key_is_migrated_to_the_single_wallet_setting() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let wallet = LocalWallet::new(&mut thread_rng());
+        let key = format!("0x{}", hex::encode(wallet.signer().to_bytes()));
+        set_meta(&db, LEGACY_COLLECTION_WALLET_PRIVATE_KEY_KEY, &key)
+            .await
+            .unwrap();
+        migrate_legacy_custody_wallet(&db).await.unwrap();
+        assert_eq!(
+            meta(&db, CUSTODY_WALLET_ADDRESS_KEY).await.unwrap(),
+            Some(format!("{:#x}", wallet.address()))
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn migration_upgrades_the_previous_asset_and_withdrawal_schema() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        sqlx::query("CREATE TABLE evm_networks (chain_id INTEGER PRIMARY KEY, name TEXT NOT NULL, rpc_url TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE supported_assets (id TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, symbol TEXT NOT NULL, contract_address TEXT NOT NULL, usd_scale INTEGER NOT NULL DEFAULT 6, enabled INTEGER NOT NULL DEFAULT 0, UNIQUE(chain_id, symbol))")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE withdrawals (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, ledger_entry_id TEXT NOT NULL, destination_address TEXT NOT NULL, amount_usd_micros INTEGER NOT NULL, transaction_hash TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            .execute(&db)
+            .await
+            .unwrap();
+        migrate(&db).await.unwrap();
+        assert!(
+            table_has_column(&db, "supported_assets", "token_decimals")
+                .await
+                .unwrap()
+        );
+        assert!(
+            table_has_column(&db, "withdrawals", "address_book_entry_id")
+                .await
+                .unwrap()
+        );
+        let bsc_decimals: i64 =
+            sqlx::query_scalar("SELECT token_decimals FROM supported_assets WHERE id='56-USDC'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(bsc_decimals, 18);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
