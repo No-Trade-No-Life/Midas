@@ -141,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
 fn app(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
+        .route("/openapi.yaml", get(openapi_yaml))
         .route("/auth/config", get(auth_config))
         .route("/setup/status", get(setup_status))
         .route("/setup/initialize", post(setup_initialize))
@@ -174,6 +175,13 @@ async fn health() -> Json<Health> {
         custody_execution: "disabled_in_v1",
     })
 }
+async fn openapi_yaml() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
+        include_str!("../openapi.yaml"),
+    )
+}
+
 async fn auth_config() -> Json<AuthConfig> {
     Json(AuthConfig {
         auth_mini_base_url: AUTH_MINI_BASE_URL,
