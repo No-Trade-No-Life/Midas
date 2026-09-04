@@ -6,13 +6,13 @@
 
 - Rust/Axum API with SQLite **WAL** persistence.
 - Exact USD micro-ledger (`amount_usd_micros` / `balance_delta_usd_micros`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD micro-dollars.
-- One persisted dedicated EVM deposit key/address per user and built-in chain; private material is never returned from an API.
+- One persisted dedicated EVM-compatible deposit key/address per user, automatically created after initialization; private material is never returned from an API.
 - Receipt-driven deposits: the caller submits one transaction hash, Midas verifies its ERC-20 `Transfer` event, credits USD, then submits the gas-funding and source-wallet collection sequence.
 - Atomic internal transfers, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
 - One-time `app_meta.root_user_id` bootstrap plus a root-only, input-only custody-wallet private key. Its address is derived server-side and the same wallet funds gas, collects deposits, and signs withdrawals.
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary.
 - Linkit React Components, including `LinkitAppHeaderUser` and `LinkitUserPicker` for username-based transfer recipients.
-- Per-user, per-chain EVM withdrawal address book. Withdrawals require a saved same-chain address-book entry; the API never accepts a free-form destination address.
+- Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. A destination can be saved and labelled from its withdrawal history afterward.
 - OpenAPI contract and CI foundation.
 
 ## Architecture
@@ -38,13 +38,13 @@ Midas records **USD only** in integer micro-dollars. Future USDC/USDT chain meta
 | `users` | Auth Mini subjects |
 | `evm_networks` | Seeded built-in public-RPC chain metadata |
 | `supported_assets` | Seeded USDC / USDT contract and decimal metadata |
-| `wallet_addresses` | One user + one EVM chain deposit address |
+| `wallet_addresses` | One user EVM-compatible deposit address (legacy chain field is an internal sentinel) |
 | `wallet_private_keys` | Dedicated EVM deposit private keys; readable only by the service account |
 | `ledger_entries` | Immutable USD balance deltas and payment history |
 | `payment_operations` | Per-user idempotency keys for payment writes |
 | `deposits`, `deposit_sweeps` | Confirmed deposits and the two-step collection state |
 | `address_book_entries` | Per-user, per-chain approved withdrawal destinations |
-| `internal_transfers`, `withdrawals` | Atomic internal transfers and address-book-bound chain withdrawal state |
+| `internal_transfers`, `withdrawals` | Atomic internal transfers and direct-destination chain withdrawal state |
 
 ## Local development
 
@@ -70,12 +70,12 @@ Other applications can use the OpenAPI-described payment API with an Auth Mini b
 GET /api/balances/me
 GET /api/ledger/me
 GET /api/wallet-addresses/me
-POST /api/wallet-addresses/me
 POST /api/deposits/confirm
 POST /api/transfers
 GET/POST /api/address-book/me
 PUT/DELETE /api/address-book/me/{id}
 POST /api/withdrawals
+POST /api/withdrawals/{id}/address-book
 POST /api/withdrawals/{id}/finalize
 ```
 
