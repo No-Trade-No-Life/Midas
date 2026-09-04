@@ -37,7 +37,7 @@ jobs:
           python3 - <<'PY' > ssm-parameters.json
           import json, os
           sha = os.environ["DEPLOY_SHA"]
-          commands = [f'''set -euo pipefail
+          commands = [f'''set -eu
           deploy_dir="{os.environ['DEPLOY_DIR']}"
           data_dir="{os.environ['DATA_DIR']}"
           release_dir="$deploy_dir/releases/{sha}"
