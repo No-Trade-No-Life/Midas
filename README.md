@@ -10,7 +10,8 @@
 - Receipt-driven deposits: the caller submits one transaction hash, Midas verifies its ERC-20 `Transfer` event, credits USD, then submits the gas-funding and source-wallet collection sequence.
 - Atomic internal transfers, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
 - One-time `app_meta.root_user_id` bootstrap plus a root-only, input-only custody-wallet private key. Its address is derived server-side and the same wallet funds gas, collects deposits, and signs withdrawals.
-- Auth Mini backend verification boundary and React `AuthMiniProvider` boundary.
+- Auth Mini backend verification boundary and React `AuthMiniProvider` boundary with automatic redirect to sign-in; Midas has no unauthenticated home page.
+- A scannable QR code for the dedicated deposit address.
 - Linkit React Components, including `LinkitAppHeaderUser` and `LinkitUserPicker` for username-based transfer recipients.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. A destination can be saved and labelled from its withdrawal history afterward.
 - OpenAPI contract and CI foundation.

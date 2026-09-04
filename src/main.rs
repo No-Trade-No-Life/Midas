@@ -15,7 +15,7 @@ use ethers::{
     middleware::SignerMiddleware,
     providers::{Http, Middleware, Provider},
     signers::{LocalWallet, Signer},
-    types::{Address, H256, TransactionRequest, U256},
+    types::{Address, H256, Log, TransactionRequest, U256},
     utils::keccak256,
 };
 use rand::thread_rng;
@@ -70,7 +70,7 @@ const BUILTIN_EVM_NETWORKS: [BuiltinEvmNetwork; 6] = [
     BuiltinEvmNetwork {
         chain_id: 56,
         name: "BNB Smart Chain",
-        rpc_url: "https://bsc-rpc.publicnode.com",
+        rpc_url: "https://bsc-dataseed.binance.org/",
     },
     BuiltinEvmNetwork {
         chain_id: 8453,
@@ -1501,10 +1501,18 @@ async fn verify_deposit_receipt(
     if receipt.status.map(|status| status.as_u64()) != Some(1) {
         return Err(ApiError::invalid("the deposit transaction reverted"));
     }
+    verified_deposit_transfer(target, transaction_hash, &receipt.logs)
+}
+
+fn verified_deposit_transfer(
+    target: &DepositTarget,
+    transaction_hash: H256,
+    logs: &[Log],
+) -> Result<VerifiedDeposit, ApiError> {
     let contract = parse_address(&target.contract_address, "configured token contract")?;
     let recipient = parse_address(&target.address, "stored deposit address")?;
     let transfer_topic = H256::from(keccak256("Transfer(address,address,uint256)"));
-    for (log_index, log) in receipt.logs.iter().enumerate() {
+    for (log_index, log) in logs.iter().enumerate() {
         if log.address != contract || log.topics.len() != 3 || log.topics[0] != transfer_topic {
             continue;
         }
@@ -2078,6 +2086,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(builtin_assets, 12);
+        let bsc_rpc_url: String =
+            sqlx::query_scalar("SELECT rpc_url FROM evm_networks WHERE chain_id=56")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(bsc_rpc_url, "https://bsc-dataseed.binance.org/");
         let _ = std::fs::remove_file(path);
     }
 
@@ -2216,6 +2230,53 @@ mod tests {
             U256::exp10(18)
         );
         assert!(token_units_to_usd_micros(U256::from(1_u64), 18).is_err());
+    }
+
+    #[test]
+    fn credits_the_reported_bsc_usdt_transfer_from_its_receipt_log() {
+        let contract = Address::from_str("0x55d398326f99059ff775485246999027b3197955").unwrap();
+        let sender = Address::from_str("0xeb2d2f1b8c558a40207669291fda468e50c8a0bb").unwrap();
+        let recipient = Address::from_str("0x70166492386b11f30ad2db285f103cfd56b7e990").unwrap();
+        let mut sender_topic = [0_u8; 32];
+        sender_topic[12..].copy_from_slice(sender.as_bytes());
+        let mut recipient_topic = [0_u8; 32];
+        recipient_topic[12..].copy_from_slice(recipient.as_bytes());
+        let amount = U256::from_dec_str("2990000000000000000").unwrap();
+        let mut data = [0_u8; 32];
+        amount.to_big_endian(&mut data);
+        let target = DepositTarget {
+            wallet_id: "wallet".to_string(),
+            address: format!("{recipient:#x}"),
+            asset_id: "56-USDT".to_string(),
+            symbol: "USDT".to_string(),
+            contract_address: format!("{contract:#x}"),
+            rpc_url: builtin_network(56).unwrap().rpc_url.to_string(),
+            token_decimals: 18,
+        };
+        let log = Log {
+            address: contract,
+            topics: vec![
+                H256::from(keccak256("Transfer(address,address,uint256)")),
+                H256::from(sender_topic),
+                H256::from(recipient_topic),
+            ],
+            data: data.to_vec().into(),
+            ..Default::default()
+        };
+
+        let verified = verified_deposit_transfer(
+            &target,
+            H256::from_str("0xe20c5cd0f743181614128a32c6e982c11355190f70e4e580d71207d914f23abe")
+                .unwrap(),
+            &[log],
+        )
+        .unwrap();
+        assert_eq!(verified.amount_usd_micros, 2_990_000);
+        assert_eq!(verified.raw_amount, "2990000000000000000");
+        assert_eq!(
+            builtin_network(56).unwrap().rpc_url,
+            "https://bsc-dataseed.binance.org/"
+        );
     }
 
     #[tokio::test]
