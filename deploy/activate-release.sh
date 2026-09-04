@@ -55,7 +55,8 @@ midas.ntnl.io {
 }
 CADDY
 systemctl daemon-reload
-systemctl enable --now "$MIDAS_SERVICE_NAME"
+systemctl enable "$MIDAS_SERVICE_NAME"
+systemctl restart "$MIDAS_SERVICE_NAME"
 systemctl enable --now caddy
 systemctl restart caddy
 for _ in $(seq 1 30); do
