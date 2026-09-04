@@ -44,14 +44,6 @@ jobs:
           archive="{os.environ['ARCHIVE_NAME']}"
           metadata="{os.environ['METADATA_NAME']}"
           release_base="https://github.com/No-Trade-No-Life/Midas/releases/download/latest"
-          previous="$(readlink -f "$deploy_dir/current" 2>/dev/null || true)"
-          rollback() {{
-            if [ -n "$previous" ] && [ -d "$previous" ]; then
-              ln -sfn "$previous" "$deploy_dir/current"
-              systemctl restart {os.environ['SERVICE_NAME']} || true
-            fi
-          }}
-          trap rollback ERR
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y caddy curl ca-certificates
           mkdir -p "$release_dir" "$data_dir"
@@ -99,7 +91,6 @@ jobs:
             version="$(curl -fsS --max-time 2 http://127.0.0.1:8787/api/version || true)"
             if [ -n "$version" ] && VERSION="$version" EXPECTED="{sha}" python3 -c 'import json,os; assert json.loads(os.environ["VERSION"])["git_sha"] == os.environ["EXPECTED"]'; then
               curl -fsS --max-time 2 http://127.0.0.1:8787/api/health
-              trap - ERR
               rm -f "/tmp/$archive" "/tmp/$archive.sha256" "/tmp/$metadata"
               exit 0
             fi
