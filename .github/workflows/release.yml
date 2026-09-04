@@ -40,7 +40,8 @@ jobs:
           sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
           printf '{"git_sha":"%s","version":"%s"}\n' "$GITHUB_SHA" "$(cargo pkgid | sed 's/.*#//')" > "$METADATA_NAME"
       - name: Move latest tag and publish artifacts
-        env: { GH_TOKEN: ${{ github.token }} }
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git tag --force latest "$GITHUB_SHA"
           git push origin refs/tags/latest --force
