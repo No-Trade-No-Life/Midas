@@ -9,6 +9,7 @@ set -eu
 release_base="https://github.com/No-Trade-No-Life/Midas/releases/download/latest"
 release_dir="$MIDAS_DEPLOY_DIR/releases/$MIDAS_DEPLOY_SHA"
 
+DEBIAN_FRONTEND=noninteractive apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y caddy curl ca-certificates
 if ! id -u midas >/dev/null 2>&1; then
   useradd --system --home-dir "$MIDAS_DATA_DIR" --shell /usr/sbin/nologin midas
