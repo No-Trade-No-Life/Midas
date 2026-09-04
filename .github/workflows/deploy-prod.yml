@@ -86,10 +86,10 @@ jobs:
           WantedBy=multi-user.target
           UNIT
           cat > /etc/caddy/Caddyfile <<'CADDY'
-          midas.ntnl.io {
+          midas.ntnl.io {{
             encode zstd gzip
             reverse_proxy 127.0.0.1:8787
-          }
+          }}
           CADDY
           systemctl daemon-reload
           systemctl enable --now {os.environ['SERVICE_NAME']}
