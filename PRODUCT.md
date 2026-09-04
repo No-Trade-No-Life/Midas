@@ -26,7 +26,7 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 ## Platform and UI
 
 - Web application, mobile first, public URL `https://midas.ntnl.io`.
-- Auth Mini owns sign-in and session lifecycle. Linkit supplies authenticated profile/recipient identity surfaces.
+- Auth Mini owns sign-in and session lifecycle; unauthenticated visits redirect directly to Auth Mini rather than rendering a local landing page. Linkit supplies authenticated profile/recipient identity surfaces.
 - Chinese and English are first-class, build-time-complete languages.
 - The interface uses the standard shadcn Base UI component vocabulary. It is a restrained operational product surface: crisp, familiar controls; a single column and bottom navigation on a phone; denser panels on larger screens.
 

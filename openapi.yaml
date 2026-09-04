@@ -67,7 +67,7 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/DepositRequest' }
-      responses: { '200': { description: Credited deposit }, '409': { description: Transaction is not final or already credited } }
+      responses: { '200': { description: Credited deposit }, '409': { description: Transaction is not final or already credited }, '422': { description: Transaction, asset, or recipient does not match }, '502': { description: Blockchain RPC is unavailable; retry without balance change } }
   /transfers:
     post:
       summary: Atomically move an available USD balance to another existing Midas user
