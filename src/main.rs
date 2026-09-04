@@ -56,6 +56,13 @@ struct Health {
 }
 
 #[derive(Serialize)]
+struct Version {
+    git_sha: &'static str,
+    package_version: &'static str,
+    custody_execution: &'static str,
+}
+
+#[derive(Serialize)]
 struct AuthConfig {
     auth_mini_base_url: &'static str,
     audiences: Vec<&'static str>,
@@ -132,7 +139,10 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("initialize Auth Mini verifier")?;
     let app = app(AppState { db, verifier });
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8787));
+    let addr = std::env::var("MIDAS_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
+        .parse::<SocketAddr>()
+        .context("parse MIDAS_ADDR")?;
     println!("Midas v1 skeleton listening on http://{addr}");
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
     Ok(())
@@ -141,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
 fn app(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
+        .route("/version", get(version))
         .route("/openapi.yaml", get(openapi_yaml))
         .route("/auth/config", get(auth_config))
         .route("/setup/status", get(setup_status))
@@ -172,6 +183,14 @@ async fn health() -> Json<Health> {
     Json(Health {
         ok: true,
         service: "midas",
+        custody_execution: "disabled_in_v1",
+    })
+}
+
+async fn version() -> Json<Version> {
+    Json(Version {
+        git_sha: option_env!("MIDAS_BUILD_SHA").unwrap_or("development"),
+        package_version: env!("CARGO_PKG_VERSION"),
         custody_execution: "disabled_in_v1",
     })
 }
@@ -455,9 +474,13 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 fn data_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("midas")
+    std::env::var_os("MIDAS_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("midas")
+        })
 }
 
 #[cfg(test)]

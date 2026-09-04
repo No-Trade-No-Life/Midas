@@ -1,0 +1,119 @@
+name: Deploy Production
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+concurrency:
+  group: deploy-midas-prod
+  cancel-in-progress: false
+permissions:
+  contents: read
+  id-token: write
+env:
+  AWS_REGION: ap-southeast-1
+  INSTANCE_ID: i-0574c0e78cb3ca1d1
+  SERVICE_NAME: midas
+  DEPLOY_DIR: /opt/midas
+  DATA_DIR: /var/lib/midas
+  ARCHIVE_NAME: midas-linux-x86_64.tar.gz
+  METADATA_NAME: midas-linux-x86_64.metadata.json
+jobs:
+  deploy:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    environment: midas-prod
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select release commit
+        run: echo "DEPLOY_SHA=${{ github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_ENV"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::524909477426:role/MidasGithubDeployRole
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Send managed deployment command
+        run: |
+          python3 - <<'PY' > ssm-parameters.json
+          import json, os
+          sha = os.environ["DEPLOY_SHA"]
+          commands = [f'''set -euo pipefail
+          deploy_dir="{os.environ['DEPLOY_DIR']}"
+          data_dir="{os.environ['DATA_DIR']}"
+          release_dir="$deploy_dir/releases/{sha}"
+          archive="{os.environ['ARCHIVE_NAME']}"
+          metadata="{os.environ['METADATA_NAME']}"
+          release_base="https://github.com/No-Trade-No-Life/Midas/releases/download/latest"
+          previous="$(readlink -f "$deploy_dir/current" 2>/dev/null || true)"
+          rollback() {{
+            if [ -n "$previous" ] && [ -d "$previous" ]; then
+              ln -sfn "$previous" "$deploy_dir/current"
+              systemctl restart {os.environ['SERVICE_NAME']} || true
+            fi
+          }}
+          trap rollback ERR
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y caddy curl ca-certificates
+          mkdir -p "$release_dir" "$data_dir"
+          curl -fsS "$release_base/$archive" -o "/tmp/$archive"
+          curl -fsS "$release_base/$archive.sha256" -o "/tmp/$archive.sha256"
+          curl -fsS "$release_base/$metadata" -o "/tmp/$metadata"
+          (cd /tmp && sha256sum -c "$archive.sha256")
+          test "$(python3 -c 'import json; print(json.load(open("/tmp/{os.environ['METADATA_NAME']}"))["git_sha"])')" = "{sha}"
+          rm -rf "$release_dir"
+          mkdir -p "$release_dir"
+          tar -xzf "/tmp/$archive" -C "$release_dir" --strip-components=1
+          ln -sfn "$release_dir" "$deploy_dir/current"
+          cat > /etc/systemd/system/{os.environ['SERVICE_NAME']}.service <<'UNIT'
+          [Unit]
+          Description=Midas safe v1 skeleton
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          WorkingDirectory=/opt/midas/current
+          Environment=MIDAS_ADDR=127.0.0.1:8787
+          Environment=MIDAS_HOME=/var/lib/midas
+          ExecStart=/opt/midas/current/midas
+          Restart=always
+          RestartSec=5
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectHome=true
+          ProtectSystem=strict
+          ReadWritePaths=/var/lib/midas /opt/midas
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          cat > /etc/caddy/Caddyfile <<'CADDY'
+          midas.ntnl.io {
+            encode zstd gzip
+            reverse_proxy 127.0.0.1:8787
+          }
+          CADDY
+          systemctl daemon-reload
+          systemctl enable --now {os.environ['SERVICE_NAME']}
+          systemctl enable --now caddy
+          systemctl restart caddy
+          for attempt in $(seq 1 30); do
+            version="$(curl -fsS --max-time 2 http://127.0.0.1:8787/api/version || true)"
+            if [ -n "$version" ] && VERSION="$version" EXPECTED="{sha}" python3 -c 'import json,os; assert json.loads(os.environ["VERSION"])["git_sha"] == os.environ["EXPECTED"]'; then
+              curl -fsS --max-time 2 http://127.0.0.1:8787/api/health
+              trap - ERR
+              rm -f "/tmp/$archive" "/tmp/$archive.sha256" "/tmp/$metadata"
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1''']
+          print(json.dumps({"commands": commands}))
+          PY
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy safe Midas skeleton $DEPLOY_SHA" \
+            --parameters file://ssm-parameters.json \
+            --query 'Command.CommandId' --output text)
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID"
+          aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}' --output json

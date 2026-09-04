@@ -1,15 +1,48 @@
 name: Release
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: release-midas-main
+  cancel-in-progress: false
+env:
+  ARCHIVE_NAME: midas-linux-x86_64.tar.gz
+  METADATA_NAME: midas-linux-x86_64.metadata.json
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm, cache-dependency-path: web/package-lock.json }
       - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-musl }
       - run: npm --prefix web ci && npm --prefix web run build
-      - run: cargo build --release
+      - name: Build static server
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          MIDAS_BUILD_SHA="$GITHUB_SHA" \
+          CC_x86_64_unknown_linux_musl=musl-gcc \
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+          cargo build --release --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/midas | grep -E '(statically linked|static-pie linked)'
+      - name: Package release artifact
+        run: |
+          mkdir -p release/midas-linux-x86_64/web
+          cp target/x86_64-unknown-linux-musl/release/midas release/midas-linux-x86_64/
+          cp -R web/dist release/midas-linux-x86_64/web/dist
+          tar -C release -czf "$ARCHIVE_NAME" midas-linux-x86_64
+          sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+          printf '{"git_sha":"%s","version":"%s"}\n' "$GITHUB_SHA" "$(cargo pkgid | sed 's/.*#//')" > "$METADATA_NAME"
+      - name: Move latest tag and publish artifacts
+        env: { GH_TOKEN: ${{ github.token }} }
+        run: |
+          git tag --force latest "$GITHUB_SHA"
+          git push origin refs/tags/latest --force
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title latest --notes "Automated safe Midas skeleton build from main." --target "$GITHUB_SHA"
+          gh release upload latest "$ARCHIVE_NAME" "$ARCHIVE_NAME.sha256" "$METADATA_NAME" --clobber
