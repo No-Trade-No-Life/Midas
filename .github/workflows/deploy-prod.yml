@@ -49,7 +49,7 @@ jobs:
           command_id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "Deploy safe Midas skeleton $DEPLOY_SHA" \
+            --comment "Deploy Midas payment infrastructure $DEPLOY_SHA" \
             --parameters file://ssm-parameters.json \
             --query 'Command.CommandId' --output text)
           aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID"

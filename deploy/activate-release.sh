@@ -10,7 +10,12 @@ release_base="https://github.com/No-Trade-No-Life/Midas/releases/download/latest
 release_dir="$MIDAS_DEPLOY_DIR/releases/$MIDAS_DEPLOY_SHA"
 
 DEBIAN_FRONTEND=noninteractive apt-get install -y caddy curl ca-certificates
+if ! id -u midas >/dev/null 2>&1; then
+  useradd --system --home-dir "$MIDAS_DATA_DIR" --shell /usr/sbin/nologin midas
+fi
 mkdir -p "$MIDAS_DEPLOY_DIR/releases" "$MIDAS_DATA_DIR"
+chown midas:midas "$MIDAS_DATA_DIR"
+chmod 700 "$MIDAS_DATA_DIR"
 curl -fsSL "$release_base/$MIDAS_ARCHIVE_NAME" -o "/tmp/$MIDAS_ARCHIVE_NAME"
 curl -fsSL "$release_base/$MIDAS_ARCHIVE_NAME.sha256" -o "/tmp/$MIDAS_ARCHIVE_NAME.sha256"
 curl -fsSL "$release_base/$MIDAS_METADATA_NAME" -o "/tmp/$MIDAS_METADATA_NAME"
@@ -22,15 +27,15 @@ tar -xzf "/tmp/$MIDAS_ARCHIVE_NAME" -C "$release_dir" --strip-components=1
 ln -sfn "$release_dir" "$MIDAS_DEPLOY_DIR/current"
 cat > "/etc/systemd/system/$MIDAS_SERVICE_NAME.service" <<'UNIT'
 [Unit]
-Description=Midas safe v1 skeleton
+Description=Midas payment infrastructure
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+User=midas
+Group=midas
 WorkingDirectory=/opt/midas/current
-Environment=MIDAS_ADDR=127.0.0.1:8787
-Environment=MIDAS_HOME=/var/lib/midas
 ExecStart=/opt/midas/current/midas
 Restart=always
 RestartSec=5
@@ -38,7 +43,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/midas /opt/midas
+ReadWritePaths=/var/lib/midas
 
 [Install]
 WantedBy=multi-user.target

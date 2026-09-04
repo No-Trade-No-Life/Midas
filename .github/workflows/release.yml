@@ -45,5 +45,5 @@ jobs:
         run: |
           git tag --force latest "$GITHUB_SHA"
           git push origin refs/tags/latest --force
-          gh release view latest >/dev/null 2>&1 || gh release create latest --title latest --notes "Automated safe Midas skeleton build from main." --target "$GITHUB_SHA"
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title latest --notes "Automated Midas payment-infrastructure build from main." --target "$GITHUB_SHA"
           gh release upload latest "$ARCHIVE_NAME" "$ARCHIVE_NAME.sha256" "$METADATA_NAME" --clobber

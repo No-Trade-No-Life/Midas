@@ -1,59 +1,171 @@
 openapi: 3.1.0
 info:
   title: Midas API
-  version: 0.1.0
+  version: 0.2.0
   description: >-
-    USD-denominated EVM stablecoin payment ledger. Chain execution, custody-key
-    handling, deposit watching, sweeping, withdrawals, and transfers are disabled in v1.
+    USD-denominated payment ledger for configured EVM USDC and USDT. Midas does
+    not block-scan: a client submits a specific confirmed transaction hash for
+    deposit verification. Payment writes require an Auth Mini bearer token and
+    an Idempotency-Key header.
 servers:
   - url: https://midas.ntnl.io/api
+security:
+  - bearerAuth: []
 paths:
   /health:
     get:
-      summary: Service health and v1 custody boundary
+      security: []
+      summary: Public service health
       responses: { '200': { description: Healthy } }
+  /version:
+    get:
+      security: []
+      summary: Deployed build identity
+      responses: { '200': { description: Version information } }
   /auth/config:
     get:
-      summary: Public Auth Mini and Linkit integration configuration
-      responses: { '200': { description: Auth configuration } }
+      security: []
+      summary: Public Auth Mini and Linkit configuration
+      responses: { '200': { description: Integration configuration } }
   /setup/status:
     get:
-      summary: Read root setup status
-      responses: { '200': { description: Setup status } }
+      security: []
+      summary: Root initialization state
+      responses: { '200': { description: Setup state } }
   /setup/initialize:
     post:
-      summary: Bootstrap root_user_id once with the authenticated Auth Mini subject
-      security: [{ bearerAuth: [] }]
-      responses: { '200': { description: Initialized }, '409': { description: Already initialized } }
+      summary: Initialize root_user_id once with the caller's own Auth Mini subject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [root_user_id], properties: { root_user_id: { type: string, format: uuid } } }
+      responses: { '200': { description: Initialized }, '403': { description: Caller and supplied subject differ }, '409': { description: Already initialized } }
+  /assets:
+    get:
+      summary: Configured USDC/USDT assets and EVM networks
+      responses: { '200': { description: Assets } }
   /balances/me:
     get:
-      summary: Read current user's USD ledger balance
-      security: [{ bearerAuth: [] }]
-      responses: { '200': { description: USD balance } }
+      summary: Current caller's available USD balance, in exact micro-dollars
+      responses: { '200': { description: Balance, content: { application/json: { schema: { $ref: '#/components/schemas/Balance' } } } } }
   /ledger/me:
     get:
-      summary: Read current user's immutable USD ledger entries
-      security: [{ bearerAuth: [] }]
+      summary: Current caller's immutable USD ledger history
       responses: { '200': { description: Ledger entries } }
   /wallet-addresses/me:
     get:
-      summary: Read current user's allocated EVM deposit addresses
-      security: [{ bearerAuth: [] }]
+      summary: Current caller's EVM deposit addresses
       responses: { '200': { description: Deposit addresses } }
+    post:
+      summary: Allocate or return the caller's dedicated EVM deposit address for a configured chain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [chain_id], properties: { chain_id: { type: integer, format: int64 } } }
+      responses: { '200': { description: Deposit address } }
+  /deposits/confirm:
+    post:
+      summary: Verify one confirmed ERC-20 Transfer receipt, credit USD, and queue collection
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DepositRequest' }
+      responses: { '200': { description: Credited deposit }, '409': { description: Transaction is not final or already credited } }
+  /transfers:
+    post:
+      summary: Atomically move an available USD balance to another existing Midas user
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransferRequest' }
+      responses: { '200': { description: Posted transfer }, '409': { description: Insufficient balance } }
+  /withdrawals:
+    get:
+      summary: Current caller's withdrawals and their chain finality state
+      responses: { '200': { description: Withdrawals } }
+    post:
+      summary: Reserve USD and submit an ERC-20 withdrawal when a collection signer is configured
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WithdrawalRequest' }
+      responses: { '200': { description: Withdrawal accepted } }
+  /withdrawals/{id}/finalize:
+    post:
+      summary: Verify the exact submitted withdrawal transaction receipt and resolve its reserved ledger entry
+      parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses: { '200': { description: Finalized withdrawal }, '409': { description: Not confirmed yet } }
   /admin/evm-config:
     get:
-      summary: Read root-managed public EVM configuration
-      security: [{ bearerAuth: [] }]
+      summary: Root-only EVM configuration; never returns private key material
       responses: { '200': { description: EVM configuration } }
     put:
-      summary: Update root-managed public EVM configuration; never accepts private keys
-      security: [{ bearerAuth: [] }]
-      responses: { '200': { description: EVM configuration } }
-  /admin/custody/private-key:
+      summary: Root-only configuration for networks, USDC/USDT, gas wallet, and collection wallet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvmConfigInput' }
+      responses: { '200': { description: Saved configuration } }
+  /admin/deposits/{id}/sweep:
     post:
-      summary: Explicitly disabled in v1
-      security: [{ bearerAuth: [] }]
-      responses: { '501': { description: Custody private-key handling disabled } }
+      summary: Root-only retry of the gas-funding and ERC-20 collection sequence
+      parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses: { '200': { description: Sweep submitted or awaiting configuration } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 128 }
+      description: A stable caller-generated key for exactly-once payment intent creation.
+  schemas:
+    Balance:
+      type: object
+      required: [currency, available_usd_micros, available_usd]
+      properties:
+        currency: { const: USD }
+        available_usd_micros: { type: integer, format: int64, description: Exact USD micro-dollars }
+        available_usd: { type: string, example: '12.500000' }
+    DepositRequest:
+      type: object
+      required: [chain_id, asset_id, transaction_hash]
+      properties:
+        chain_id: { type: integer, format: int64 }
+        asset_id: { type: string }
+        transaction_hash: { type: string, pattern: '^0x[a-fA-F0-9]{64}$' }
+    TransferRequest:
+      type: object
+      required: [recipient_user_id, amount_usd_micros]
+      properties:
+        recipient_user_id: { type: string, format: uuid }
+        amount_usd_micros: { type: integer, format: int64, minimum: 1 }
+        note: { type: string, maxLength: 280 }
+    WithdrawalRequest:
+      type: object
+      required: [asset_id, destination_address, amount_usd_micros]
+      properties:
+        asset_id: { type: string }
+        destination_address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$' }
+        amount_usd_micros: { type: integer, format: int64, minimum: 1 }
+        note: { type: string, maxLength: 280 }
+    EvmConfigInput:
+      type: object
+      properties:
+        gas_account_private_key: { type: string, writeOnly: true }
+        collection_wallet_address: { type: string }
+        collection_wallet_private_key: { type: string, writeOnly: true }
+        gas_funding_wei: { type: string, pattern: '^[0-9]+$' }
+        networks: { type: array, items: { type: object, required: [chain_id, name, rpc_url, enabled], properties: { chain_id: { type: integer }, name: { type: string }, rpc_url: { type: string, format: uri }, enabled: { type: boolean } } } }
+        assets: { type: array, items: { type: object, required: [id, chain_id, symbol, contract_address, enabled], properties: { id: { type: string }, chain_id: { type: integer }, symbol: { enum: [USDC, USDT] }, contract_address: { type: string }, enabled: { type: boolean } } } }
