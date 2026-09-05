@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Midas API
-  version: 0.5.0
+  version: 0.6.0
   description: >-
     USD-denominated payment ledger for built-in EVM USDC and USDT on Ethereum,
     BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. Midas scans
@@ -181,14 +181,14 @@ paths:
           description: Owned payment channels
           content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/PaymentAgreement' } } } }
     post:
-      summary: Create an automatic-payment channel and return its plaintext API key exactly once
+      summary: Create an automatic-payment channel without issuing a plaintext API key
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementInput' } } }
       responses:
         '200':
-          description: New payment channel and one-time API key
-          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementCreated' } } }
+          description: New payment channel
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreement' } } }
   /agreements/bindings/me:
     get:
       summary: Current caller's automatic-payment authorizations
@@ -213,6 +213,15 @@ paths:
       summary: Revoke the current caller's automatic-payment authorization
       parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
       responses: { '204': { description: Authorization revoked } }
+  /agreements/{id}/api-key:
+    post:
+      summary: Owner-only API-key rotation; invalidates the previous key and returns the new plaintext key exactly once
+      parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        '200':
+          description: Rotated payment channel key
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementApiKey' } } }
+        '403': { description: Caller does not own this payment channel }
   /agreements/{id}/charges:
     post:
       security: [ { agreementApiKey: [] } ]
@@ -478,12 +487,12 @@ components:
       required: [name]
       properties:
         name: { type: string, minLength: 1, maxLength: 80 }
-    PaymentAgreementCreated:
+    PaymentAgreementApiKey:
       type: object
       required: [agreement, api_key]
       properties:
         agreement: { $ref: '#/components/schemas/PaymentAgreement' }
-        api_key: { type: string, writeOnly: true, description: Returned only by channel creation; save it now. }
+        api_key: { type: string, writeOnly: true, description: Returned only by owner key rotation; save it now. }
     PaymentAgreementDetail:
       type: object
       required: [agreement, bound]

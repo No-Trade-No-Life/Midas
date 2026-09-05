@@ -15,7 +15,7 @@
 - Linkit React Components, including `LinkitAppHeaderUser` and `LinkitUserPicker` for username-based transfer recipients.
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
-- Automatic-payment agreements: an owner creates a channel and receives an API key once; a customer explicitly authorizes the channel through a signed-in GUI page; its API key can then make an idempotent USD charge only against that customer's available balance, paired with an immutable credit to the owner.
+- Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page; its API key can then make an idempotent USD charge only against an authorized user's available balance, paired with an immutable credit to the owner.
 - OpenAPI contract and CI foundation.
 
 ## Architecture
@@ -89,6 +89,7 @@ GET/POST /api/agreements/owned
 GET /api/agreements/bindings/me
 GET /api/agreements/{id}
 POST/DELETE /api/agreements/{id}/bind
+POST /api/agreements/{id}/api-key
 ```
 
 An external payment channel charges with `POST /api/agreements/{id}/charges`, an
