@@ -145,6 +145,54 @@ CREATE TABLE IF NOT EXISTS address_book_entries (
   UNIQUE(user_id, chain_id, address)
 );
 
+-- A saved withdrawal target is deliberately keyed by the full destination,
+-- network, and token relationship. A destination may be correct for one
+-- stablecoin on a network while being unsuitable for another.
+CREATE TABLE IF NOT EXISTS withdrawal_target_notes (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  asset_id TEXT NOT NULL REFERENCES supported_assets(id),
+  address TEXT NOT NULL,
+  label TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(user_id, asset_id, address)
+);
+
+-- A payment agreement is a channel owned by one Midas user. The plaintext
+-- API key is returned only at creation; the database keeps a one-way hash and
+-- a non-secret prefix for identification.
+CREATE TABLE IF NOT EXISTS payment_agreements (
+  id TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  api_key_hash TEXT NOT NULL UNIQUE,
+  api_key_prefix TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS payment_agreement_bindings (
+  agreement_id TEXT NOT NULL REFERENCES payment_agreements(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(agreement_id, user_id)
+);
+
+-- Every charge is pinned to the two immutable ledger rows it creates. The
+-- agreement-scoped idempotency key makes retrying an external charge safe.
+CREATE TABLE IF NOT EXISTS payment_agreement_charges (
+  id TEXT PRIMARY KEY,
+  agreement_id TEXT NOT NULL REFERENCES payment_agreements(id),
+  payer_user_id TEXT NOT NULL REFERENCES users(id),
+  amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros > 0),
+  payer_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  owner_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  idempotency_key TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(agreement_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS withdrawals (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
@@ -174,3 +222,9 @@ CREATE INDEX IF NOT EXISTS withdrawals_user_created_idx
   ON withdrawals(user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS address_book_entries_user_chain_idx
   ON address_book_entries(user_id, chain_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS withdrawal_target_notes_user_asset_idx
+  ON withdrawal_target_notes(user_id, asset_id, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS payment_agreements_owner_created_idx
+  ON payment_agreements(owner_user_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS payment_agreement_bindings_user_created_idx
+  ON payment_agreement_bindings(user_id, created_at DESC, agreement_id);

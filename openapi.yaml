@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Midas API
-  version: 0.4.0
+  version: 0.5.0
   description: >-
     USD-denominated payment ledger for built-in EVM USDC and USDT on Ethereum,
     BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. Midas scans
@@ -11,7 +11,9 @@ info:
     selected asset through the explicit confirmation endpoint, and customers can
     claim a missed transaction with only its chain and transaction ID.
     Payment writes require an Auth Mini bearer token and an Idempotency-Key
-    header.
+    header. Automatic-payment charges are the exception: their owner-created
+    channel authenticates with X-Api-Key, can charge only a user who bound that
+    channel, and still requires an agreement-scoped Idempotency-Key.
 servers:
   - url: https://midas.ntnl.io/api
 security:
@@ -148,11 +150,86 @@ paths:
       summary: Delete an unused address book entry
       parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
       responses: { '204': { description: Deleted }, '409': { description: Entry is used by a withdrawal } }
+  /withdrawal-targets/me:
+    get:
+      summary: Current caller's unique broadcast withdrawal destinations, grouped by address, network, and token with an optional saved note
+      responses:
+        '200':
+          description: Withdrawal targets
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/WithdrawalAddressTarget' } } } }
+    put:
+      summary: Save or rename a note for a destination that has previously been broadcast for this exact asset
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/WithdrawalTargetNoteInput' } } }
+      responses: { '200': { description: Saved target note }, '422': { description: Target has not been broadcast by this caller } }
+  /withdrawal-targets/me/{id}:
+    delete:
+      summary: Remove only the caller's note from a historical withdrawal target
+      parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses: { '204': { description: Note removed } }
   /withdrawals/{id}/finalize:
     post:
       summary: Verify the exact submitted withdrawal transaction receipt and resolve its reserved ledger entry
       parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
       responses: { '200': { description: Finalized withdrawal }, '409': { description: Not confirmed yet } }
+  /agreements/owned:
+    get:
+      summary: Current caller's automatic-payment channels; plaintext API keys are never returned here
+      responses:
+        '200':
+          description: Owned payment channels
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/PaymentAgreement' } } } }
+    post:
+      summary: Create an automatic-payment channel and return its plaintext API key exactly once
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementInput' } } }
+      responses:
+        '200':
+          description: New payment channel and one-time API key
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementCreated' } } }
+  /agreements/bindings/me:
+    get:
+      summary: Current caller's automatic-payment authorizations
+      responses:
+        '200':
+          description: Payment-channel bindings
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/PaymentAgreementBinding' } } } }
+  /agreements/{id}:
+    get:
+      summary: Read an automatic-payment channel and whether the caller authorized it
+      parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        '200':
+          description: Payment-channel authorization state
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementDetail' } } }
+  /agreements/{id}/bind:
+    post:
+      summary: Authorize an automatic-payment channel for the current caller
+      parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses: { '200': { description: Bound payment channel } }
+    delete:
+      summary: Revoke the current caller's automatic-payment authorization
+      parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses: { '204': { description: Authorization revoked } }
+  /agreements/{id}/charges:
+    post:
+      security: [ { agreementApiKey: [] } ]
+      summary: Charge an explicitly bound user's available USD balance and credit the channel owner atomically
+      parameters:
+        - { $ref: '#/components/parameters/AgreementApiKey' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementChargeInput' } } }
+      responses:
+        '200':
+          description: Posted, idempotent automatic charge
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementCharge' } } }
+        '401': { description: Missing or invalid channel API key }
+        '409': { description: User has not authorized this channel or has insufficient available USD }
   /admin/evm-config:
     get:
       summary: Root-only EVM configuration; never returns private key material
@@ -237,6 +314,7 @@ paths:
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    agreementApiKey: { type: apiKey, in: header, name: X-Api-Key }
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -244,6 +322,12 @@ components:
       required: true
       schema: { type: string, maxLength: 128 }
       description: A stable caller-generated key for exactly-once payment intent creation.
+    AgreementApiKey:
+      name: X-Api-Key
+      in: header
+      required: true
+      schema: { type: string }
+      description: One-time channel API key returned when its owner created the payment agreement.
   schemas:
     Balance:
       type: object
@@ -360,6 +444,75 @@ components:
         chain_id: { type: integer, enum: [1, 10, 56, 137, 8453, 42161] }
         label: { type: string, minLength: 1, maxLength: 80 }
         address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$' }
+    WithdrawalAddressTarget:
+      type: object
+      required: [asset_id, asset_symbol, chain_id, network_name, address, last_withdrawn_at]
+      properties:
+        note_id: { type: [string, 'null'], format: uuid }
+        asset_id: { type: string }
+        asset_symbol: { type: string, enum: [USDC, USDT] }
+        chain_id: { type: integer, enum: [1, 10, 56, 137, 8453, 42161] }
+        network_name: { type: string }
+        address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$' }
+        label: { type: [string, 'null'], maxLength: 80 }
+        last_withdrawn_at: { type: string, format: date-time }
+    WithdrawalTargetNoteInput:
+      type: object
+      required: [asset_id, address, label]
+      properties:
+        asset_id: { type: string }
+        address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$' }
+        label: { type: string, minLength: 1, maxLength: 80 }
+    PaymentAgreement:
+      type: object
+      required: [id, owner_user_id, name, api_key_prefix, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_user_id: { type: string, format: uuid }
+        name: { type: string, maxLength: 80 }
+        api_key_prefix: { type: string, description: Non-secret identifier only. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PaymentAgreementInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+    PaymentAgreementCreated:
+      type: object
+      required: [agreement, api_key]
+      properties:
+        agreement: { $ref: '#/components/schemas/PaymentAgreement' }
+        api_key: { type: string, writeOnly: true, description: Returned only by channel creation; save it now. }
+    PaymentAgreementDetail:
+      type: object
+      required: [agreement, bound]
+      properties:
+        agreement: { $ref: '#/components/schemas/PaymentAgreement' }
+        bound: { type: boolean }
+    PaymentAgreementBinding:
+      type: object
+      required: [agreement, created_at]
+      properties:
+        agreement: { $ref: '#/components/schemas/PaymentAgreement' }
+        created_at: { type: string, format: date-time }
+    PaymentAgreementChargeInput:
+      type: object
+      required: [user_id, amount_usd_micros]
+      properties:
+        user_id: { type: string, format: uuid, description: User who already authorized this payment channel. }
+        amount_usd_micros: { type: integer, format: int64, minimum: 1, description: Exact USD micro-dollars to charge. }
+    PaymentAgreementCharge:
+      type: object
+      required: [id, agreement_id, payer_user_id, owner_user_id, amount_usd_micros, amount_usd, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        agreement_id: { type: string, format: uuid }
+        payer_user_id: { type: string, format: uuid }
+        owner_user_id: { type: string, format: uuid }
+        amount_usd_micros: { type: integer, format: int64 }
+        amount_usd: { type: string }
+        created_at: { type: string, format: date-time }
     EvmConfigInput:
       type: object
       properties:
