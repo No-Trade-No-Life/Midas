@@ -691,11 +691,21 @@ async fn ensure_user_wallet(state: &AppState, user_id: &str) -> Result<WalletAdd
 }
 
 async fn provision_user_wallet(db: &SqlitePool, user_id: &str) -> Result<WalletAddress, ApiError> {
+    let mut tx = db.begin().await.map_err(db_error)?;
+    let wallet = provision_user_wallet_in_transaction(&mut tx, user_id).await?;
+    tx.commit().await.map_err(db_error)?;
+    Ok(wallet)
+}
+
+async fn provision_user_wallet_in_transaction(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    user_id: &str,
+) -> Result<WalletAddress, ApiError> {
     if let Some(row) = sqlx::query(
         "SELECT address,created_at FROM wallet_addresses WHERE user_id=?1 ORDER BY created_at,id LIMIT 1",
     )
     .bind(user_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_error)?
     {
@@ -705,24 +715,22 @@ async fn provision_user_wallet(db: &SqlitePool, user_id: &str) -> Result<WalletA
     let address = format!("{:#x}", private_key.address());
     let wallet_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let mut tx = db.begin().await.map_err(db_error)?;
     sqlx::query("INSERT INTO wallet_addresses(id,user_id,chain_id,address,custody_status,created_at) VALUES(?1,?2,?3,?4,'configured',?5)")
         .bind(&wallet_id)
         .bind(user_id)
         .bind(EVM_ADDRESS_SENTINEL_CHAIN_ID)
         .bind(&address)
         .bind(&now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_error)?;
     sqlx::query("INSERT INTO wallet_private_keys(wallet_address_id,private_key,created_at) VALUES(?1,?2,?3)")
         .bind(&wallet_id)
         .bind(format!("0x{}", hex::encode(private_key.signer().to_bytes())))
         .bind(&now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_error)?;
-    tx.commit().await.map_err(db_error)?;
     Ok(WalletAddress {
         address,
         created_at: now,
@@ -849,28 +857,27 @@ async fn create_transfer(
     }
     if input.recipient_user_id == sender {
         return Err(ApiError::invalid(
-            "a transfer recipient must be another Midas user",
+            "a transfer recipient must be another user",
         ));
     }
     Uuid::parse_str(&input.recipient_user_id)
         .map_err(|_| ApiError::invalid("recipient_user_id must be an Auth Mini UUID"))?;
     let _write = state.write_lock.lock().await;
-    if let Some(existing) =
-        operation_resource(&state.db, &sender, "transfer", &idempotency_key).await?
-    {
-        return Ok(Json(read_transfer_response(&state.db, &existing).await?));
+    Ok(Json(
+        post_transfer(&state.db, &sender, &input, &idempotency_key).await?,
+    ))
+}
+
+async fn post_transfer(
+    db: &SqlitePool,
+    sender: &str,
+    input: &TransferRequest,
+    idempotency_key: &str,
+) -> Result<TransferResponse, ApiError> {
+    if let Some(existing) = operation_resource(db, sender, "transfer", idempotency_key).await? {
+        return read_transfer_response(db, &existing).await;
     }
-    let recipient_exists: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE id=?1")
-        .bind(&input.recipient_user_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(db_error)?;
-    if recipient_exists.is_none() {
-        return Err(ApiError::invalid(
-            "the recipient has not opened a Midas account yet",
-        ));
-    }
-    if available_balance(&state.db, &sender).await? < input.amount_usd_micros {
+    if available_balance(db, sender).await? < input.amount_usd_micros {
         return Err(ApiError::conflict(
             "the available USD balance is insufficient",
         ));
@@ -879,13 +886,19 @@ async fn create_transfer(
     let sender_ledger_id = Uuid::new_v4().to_string();
     let recipient_ledger_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let mut tx = state.db.begin().await.map_err(db_error)?;
+    let mut tx = db.begin().await.map_err(db_error)?;
+    sqlx::query("INSERT OR IGNORE INTO users(id) VALUES(?1)")
+        .bind(&input.recipient_user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    provision_user_wallet_in_transaction(&mut tx, &input.recipient_user_id).await?;
     let outgoing_reference = format!("transfer:{transfer_id}:out");
     insert_ledger(
         &mut tx,
         LedgerInsert {
             id: &sender_ledger_id,
-            user_id: &sender,
+            user_id: sender,
             kind: "transfer_out",
             status: "posted",
             asset_id: None,
@@ -909,7 +922,7 @@ async fn create_transfer(
             asset_id: None,
             amount_usd_micros: input.amount_usd_micros,
             balance_delta_usd_micros: input.amount_usd_micros,
-            counterparty_user_id: Some(&sender),
+            counterparty_user_id: Some(sender),
             external_reference: Some(&incoming_reference),
             note: input.note.as_deref(),
             now: &now,
@@ -918,7 +931,7 @@ async fn create_transfer(
     .await?;
     sqlx::query("INSERT INTO internal_transfers(id,sender_user_id,recipient_user_id,amount_usd_micros,sender_ledger_entry_id,recipient_ledger_entry_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)")
         .bind(&transfer_id)
-        .bind(&sender)
+        .bind(sender)
         .bind(&input.recipient_user_id)
         .bind(input.amount_usd_micros)
         .bind(&sender_ledger_id)
@@ -932,9 +945,9 @@ async fn create_transfer(
         &mut tx,
         OperationInsert {
             id: &operation_id,
-            user_id: &sender,
+            user_id: sender,
             kind: "transfer",
-            idempotency_key: &idempotency_key,
+            idempotency_key,
             resource_id: &transfer_id,
             status: "completed",
             now: &now,
@@ -942,7 +955,7 @@ async fn create_transfer(
     )
     .await?;
     tx.commit().await.map_err(db_error)?;
-    Ok(Json(read_transfer_response(&state.db, &transfer_id).await?))
+    read_transfer_response(db, &transfer_id).await
 }
 
 async fn my_address_book(
@@ -2275,6 +2288,84 @@ mod tests {
         .unwrap();
         assert_eq!(address_count, 1);
         assert_eq!(key_count, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn transfer_provisions_a_new_recipient_wallet_and_posts_their_ledger_entry() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let sender = Uuid::new_v4().to_string();
+        let recipient = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&sender)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'adjustment','posted',2000000,2000000,?3)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&sender)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let request = TransferRequest {
+            recipient_user_id: recipient.clone(),
+            amount_usd_micros: 750_000,
+            note: Some("Wallet creation transfer".to_string()),
+        };
+        let transfer = post_transfer(&db, &sender, &request, "new-recipient")
+            .await
+            .unwrap();
+        let retry = post_transfer(&db, &sender, &request, "new-recipient")
+            .await
+            .unwrap();
+
+        assert_eq!(transfer.id, retry.id);
+        assert_eq!(transfer.recipient_user_id, recipient);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE id=?1")
+                .bind(&recipient)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallet_addresses WHERE user_id=?1")
+                .bind(&recipient)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallet_private_keys WHERE wallet_address_id IN (SELECT id FROM wallet_addresses WHERE user_id=?1)")
+                .bind(&recipient)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT balance_delta_usd_micros FROM ledger_entries WHERE user_id=?1 AND kind='transfer_in'")
+                .bind(&recipient)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            750_000
+        );
+        assert_eq!(available_balance(&db, &sender).await.unwrap(), 1_250_000);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM internal_transfers")
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            1
+        );
         let _ = std::fs::remove_file(path);
     }
 

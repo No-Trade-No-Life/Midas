@@ -70,7 +70,7 @@ paths:
       responses: { '200': { description: Credited deposit }, '409': { description: Transaction is not final or already credited }, '422': { description: "Transaction, asset, or recipient does not match" }, '502': { description: Blockchain RPC is unavailable; retry without balance change } }
   /transfers:
     post:
-      summary: Atomically move an available USD balance to another existing Midas user
+      summary: Atomically move an available USD balance to another user, provisioning their Midas account and wallet when needed
       parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody:
         required: true

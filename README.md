@@ -8,7 +8,7 @@
 - Exact USD micro-ledger (`amount_usd_micros` / `balance_delta_usd_micros`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD micro-dollars.
 - One persisted dedicated EVM-compatible deposit key/address per user, automatically created after initialization; private material is never returned from an API.
 - Receipt-driven deposits: the caller submits one transaction hash, Midas verifies its ERC-20 `Transfer` event, credits USD, then submits the gas-funding and source-wallet collection sequence.
-- Atomic internal transfers, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
+- Atomic internal transfers that automatically provision a new recipient's Midas account and dedicated wallet, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
 - One-time `app_meta.root_user_id` bootstrap plus a root-only, input-only custody-wallet private key. Its address is derived server-side and the same wallet funds gas, collects deposits, and signs withdrawals.
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary with automatic redirect to sign-in; Midas has no unauthenticated home page.
 - A scannable QR code for the dedicated deposit address.
