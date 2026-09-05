@@ -90,14 +90,14 @@ paths:
       summary: Current caller's withdrawals and their chain finality state
       responses: { '200': { description: Withdrawals } }
     post:
-      summary: Reserve USD and submit an ERC-20 withdrawal to a direct EVM destination address
+      summary: Reserve USD and return immediately; Midas signs, records the TxID, then broadcasts asynchronously
       parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/WithdrawalRequest' }
-      responses: { '200': { description: Withdrawal accepted } }
+      responses: { '200': { description: Withdrawal accepted before any RPC broadcast wait } }
   /withdrawals/{id}/address-book:
     post:
       summary: Save and label a destination already used by the caller's withdrawal
@@ -191,6 +191,22 @@ paths:
       summary: Root-only retry of a queued, failed, or awaiting-configuration gas-funding and ERC-20 collection sequence
       parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
       responses: { '200': { description: Sweep submitted or awaiting configuration }, '409': { description: Collection is already submitted } }
+  /admin/withdrawals:
+    get:
+      summary: Root-only withdrawal operation history, including safe-to-retry state and the most recent RPC error
+      responses:
+        '200':
+          description: Up to 100 withdrawals. Signed raw transaction payloads are never returned.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminWithdrawal' }
+  /admin/withdrawals/{id}/retry:
+    post:
+      summary: Root-only safe retry. Re-broadcasts the exact saved raw transaction, or constructs one only when no TxID exists.
+      parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses: { '200': { description: Retry queued without waiting for RPC broadcast }, '409': { description: Retrying could create a second payment } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
@@ -288,6 +304,17 @@ components:
         destination_address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$', description: Direct EVM destination. The asset determines its chain. }
         amount_usd_micros: { type: integer, format: int64, minimum: 1 }
         note: { type: string, maxLength: 280 }
+    WithdrawalResponse:
+      type: object
+      required: [id, asset_symbol, destination_address, amount_usd_micros, amount_usd, status]
+      properties:
+        id: { type: string, format: uuid }
+        asset_symbol: { type: string, enum: [USDC, USDT] }
+        destination_address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$' }
+        amount_usd_micros: { type: integer, format: int64 }
+        amount_usd: { type: string }
+        transaction_hash: { type: [string, 'null'], pattern: '^0x[a-fA-F0-9]{64}$' }
+        status: { type: string, enum: [awaiting_signer, submitted, completed, failed] }
     WithdrawalAddressBookInput:
       type: object
       required: [label]
@@ -324,3 +351,20 @@ components:
         token_transaction_hash: { type: [string, 'null'] }
         sweep_error_message: { type: [string, 'null'] }
         sweep_updated_at: { type: string, format: date-time }
+    AdminWithdrawal:
+      type: object
+      required: [id, user_id, destination_address, asset_symbol, chain_id, network_name, amount_usd_micros, amount_usd, status, created_at, retryable]
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        destination_address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$' }
+        asset_symbol: { type: string, enum: [USDC, USDT] }
+        chain_id: { type: integer, enum: [1, 10, 56, 137, 8453, 42161] }
+        network_name: { type: string }
+        amount_usd_micros: { type: integer, format: int64 }
+        amount_usd: { type: string }
+        transaction_hash: { type: [string, 'null'], pattern: '^0x[a-fA-F0-9]{64}$' }
+        status: { type: string, enum: [awaiting_signer, submitted, completed, failed] }
+        last_error: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        retryable: { type: boolean, description: Safe retry is possible without creating a different payment. }
