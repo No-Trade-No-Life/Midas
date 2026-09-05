@@ -7,13 +7,13 @@
 - Rust/Axum API with SQLite **WAL** persistence.
 - Exact USD micro-ledger (`amount_usd_micros` / `balance_delta_usd_micros`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD micro-dollars.
 - One persisted dedicated EVM-compatible deposit key/address per user, automatically created after initialization; private material is never returned from an API.
-- Automatic receipt-driven deposits: a root-configured Etherscan V2 key incrementally discovers candidate ERC-20 transaction hashes for one deposit-address/network pair per second. When the configured Free Plan excludes a chain, Midas uses a narrow recent RPC Transfer-log query as the free fallback. It then verifies every candidate's ERC-20 `Transfer` receipt through the chain RPC, credits USD, and submits the gas-funding and source-wallet collection sequence. The explicit confirmation endpoint remains available to integrations.
+- Automatic receipt-driven deposits: Midas scans a bounded RPC `Transfer`-log range for one deposit-address/network pair per second and persists its cursor. It verifies every candidate's ERC-20 receipt through the chain RPC, credits USD, and submits the gas-funding and source-wallet collection sequence. Customers can also submit a network and TxID to verify and claim a missed deposit; the token and amount are always derived from the receipt.
 - Atomic internal transfers that automatically provision a new recipient's Midas account and dedicated wallet, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
 - One-time `app_meta.root_user_id` bootstrap plus a root-only, input-only custody-wallet private key. Its address is derived server-side and the same wallet funds gas, collects deposits, and signs withdrawals.
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary with automatic redirect to sign-in; Midas has no unauthenticated home page.
 - A scannable QR code for the dedicated deposit address.
 - Linkit React Components, including `LinkitAppHeaderUser` and `LinkitUserPicker` for username-based transfer recipients.
-- A root-only administration area for custody configuration, Etherscan discovery configuration, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
+- A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. A destination can be saved and labelled from its withdrawal history afterward.
 - OpenAPI contract and CI foundation.
 
@@ -42,7 +42,7 @@ Midas records **USD only** in integer micro-dollars. Future USDC/USDT chain meta
 | `supported_assets` | Seeded USDC / USDT contract and decimal metadata |
 | `wallet_addresses` | One user EVM-compatible deposit address (legacy chain field is an internal sentinel) |
 | `wallet_private_keys` | Dedicated EVM deposit private keys; readable only by the service account |
-| `deposit_discovery_cursors` | Durable Etherscan V2 incremental-pagination cursor per deposit address and chain |
+| `deposit_discovery_cursors` | Durable bounded-RPC-scan cursor per deposit address and chain |
 | `ledger_entries` | Immutable USD balance deltas and payment history |
 | `payment_operations` | Per-user idempotency keys for payment writes |
 | `deposits`, `deposit_sweeps` | Confirmed deposits and the two-step collection state |
@@ -74,6 +74,7 @@ GET /api/balances/me
 GET /api/ledger/me
 GET /api/wallet-addresses/me
 POST /api/deposits/confirm
+POST /api/deposits/claim
 POST /api/transfers
 GET/POST /api/address-book/me
 PUT/DELETE /api/address-book/me/{id}
@@ -82,7 +83,7 @@ POST /api/withdrawals/{id}/address-book
 POST /api/withdrawals/{id}/finalize
 ```
 
-The API contract is in [`openapi.yaml`](./openapi.yaml). Midas verifies every credited deposit and withdrawal receipt independently. Etherscan V2 and the narrow Free-Plan RPC fallback are used only to discover candidate ERC-20 transaction hashes; Midas does not trust either source for transaction details or ledger amounts.
+The API contract is in [`openapi.yaml`](./openapi.yaml). Midas verifies every credited deposit and withdrawal receipt independently. RPC logs only discover candidates; Midas never trusts a log for token, recipient, amount, or final success state.
 
 ## Root configuration
 
@@ -96,10 +97,10 @@ The root can then configure the single custody wallet through:
 
 ```text
 GET/PUT /api/admin/evm-config
-GET/PUT/DELETE /api/admin/etherscan-config
+GET /api/admin/deposit-discovery
 ```
 
-Midas ships the chain, RPC, and USDC/USDT contract mapping in the binary; callers do not configure these fields. Read APIs only indicate whether the custody key or Etherscan key is configured, never return either secret, and return the custody wallet's derived public address only.
+Midas ships the chain, RPC, and USDC/USDT contract mapping in the binary; callers do not configure these fields. Read APIs never return private key material and return the custody wallet's derived public address only.
 
 ## Deployment
 

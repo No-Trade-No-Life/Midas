@@ -14,7 +14,7 @@ Product. A person checking or moving money needs clarity and calm, not a brand s
 ## Information architecture
 
 - **Home:** USD balance, its dedicated deposit address, and the next safe action.
-- **Activity:** searchable/paginated immutable ledger records with a plain-language status.
+- **Activity:** searchable/paginated immutable ledger records with a plain-language status and a small, progressive "deposit not received?" action that opens a focused claim drawer.
 - **Move money:** focused Deposit, Transfer, and Withdraw flows, each with visible network/asset/amount and non-optimistic completion feedback.
 - **Settings:** language, account, and root-only EVM setup. Secrets are input-only and visibly never re-displayed.
 

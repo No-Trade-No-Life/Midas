@@ -1,15 +1,15 @@
 openapi: 3.1.0
 info:
   title: Midas API
-  version: 0.3.0
+  version: 0.4.0
   description: >-
     USD-denominated payment ledger for built-in EVM USDC and USDT on Ethereum,
-    BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. Midas does not
-    discovers candidate ERC-20 transaction hashes incrementally through a
-    root-configured Etherscan V2 key. Where an Etherscan Free Plan excludes a
-    supported chain, Midas uses a narrow recent RPC Transfer-log fallback. Every
-    candidate is verified through the configured chain RPC before crediting. The
-    explicit deposit-confirmation endpoint remains available for integrations.
+    BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. Midas scans
+    bounded ranges of each deposit address and chain with RPC Transfer logs and
+    persists its cursor before moving forward. Every candidate is verified from
+    the configured chain RPC receipt before crediting. Integrations can submit a
+    selected asset through the explicit confirmation endpoint, and customers can
+    claim a missed transaction with only its chain and transaction ID.
     Payment writes require an Auth Mini bearer token and an Idempotency-Key
     header.
 servers:
@@ -79,6 +79,16 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/DepositRequest' }
       responses: { '200': { description: Credited deposit }, '409': { description: Transaction is not final or already credited }, '422': { description: "Transaction, asset, or recipient does not match" }, '502': { description: Blockchain RPC is unavailable; retry without balance change } }
+  /deposits/claim:
+    post:
+      summary: Verify one confirmed USDC or USDT Transfer on a selected network, credit USD, and queue collection
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DepositClaimRequest' }
+      responses: { '200': { description: Credited deposit }, '409': { description: Transaction is not final or has already been credited }, '422': { description: "Transaction, network, or recipient does not match" }, '502': { description: Blockchain RPC is unavailable; retry without balance change } }
   /transfers:
     post:
       summary: Atomically move an available USD balance to another user, provisioning their Midas account and wallet when needed
@@ -155,21 +165,10 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/EvmConfigInput' }
       responses: { '200': { description: Saved configuration } }
-  /admin/etherscan-config:
+  /admin/deposit-discovery:
     get:
-      summary: Root-only Etherscan V2 discovery configuration; never returns the API key
-      responses: { '200': { description: Discovery configuration and latest worker status, content: { application/json: { schema: { $ref: '#/components/schemas/EtherscanConfig' } } } } }
-    put:
-      summary: Root-only write-only Etherscan V2 API key configuration
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/EtherscanConfigInput' }
-      responses: { '200': { description: Saved discovery configuration } }
-    delete:
-      summary: Root-only removal of the Etherscan V2 API key
-      responses: { '204': { description: API key removed } }
+      summary: Root-only RPC discovery status
+      responses: { '200': { description: Discovery worker status, content: { application/json: { schema: { $ref: '#/components/schemas/DepositDiscoveryStatus' } } } } }
   /admin/custody-balances:
     get:
       summary: Root-only live custody wallet balances for native assets, USDC, and USDT on every built-in EVM network
@@ -317,6 +316,12 @@ components:
       properties:
         asset_id: { type: string }
         transaction_hash: { type: string, pattern: '^0x[a-fA-F0-9]{64}$' }
+    DepositClaimRequest:
+      type: object
+      required: [chain_id, transaction_hash]
+      properties:
+        chain_id: { type: integer, enum: [1, 10, 56, 137, 8453, 42161] }
+        transaction_hash: { type: string, pattern: '^0x[a-fA-F0-9]{64}$' }
     TransferRequest:
       type: object
       required: [recipient_user_id, amount_usd_micros]
@@ -359,16 +364,10 @@ components:
       type: object
       properties:
         custody_wallet_private_key: { type: string, writeOnly: true, description: "One EVM key funds gas, collects deposits, and signs withdrawals. Its address is derived server-side." }
-    EtherscanConfigInput:
+    DepositDiscoveryStatus:
       type: object
-      required: [api_key]
+      required: [polling_interval_seconds]
       properties:
-        api_key: { type: string, writeOnly: true, minLength: 1, maxLength: 128, description: "Etherscan V2 API key. It is stored server-side and never returned." }
-    EtherscanConfig:
-      type: object
-      required: [api_key_configured, polling_interval_seconds]
-      properties:
-        api_key_configured: { type: boolean }
         polling_interval_seconds: { type: integer, minimum: 1 }
         last_attempt_at: { type: [string, 'null'], format: date-time }
         last_success_at: { type: [string, 'null'], format: date-time }

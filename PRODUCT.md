@@ -6,14 +6,14 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 
 ## Users and jobs
 
-- A customer opens Midas on a phone, finds their dedicated EVM deposit address, sends a supported stablecoin, checks the USD balance after automatic discovery, transfers to another Midas user, withdraws, and reviews their immutable history.
-- An integrating application such as 1Exchange uses the bearer-authenticated API to show a balance, obtain a deposit address, confirm a deposit, create a transfer or withdrawal, and reconcile operations by idempotency key.
+- A customer opens Midas on a phone, finds their dedicated EVM deposit address, sends a supported stablecoin, checks the USD balance after automatic discovery, can claim a missed deposit by network and TxID, transfers to another Midas user, withdraws, and reviews their immutable history.
+- An integrating application such as 1Exchange uses the bearer-authenticated API to show a balance, obtain a deposit address, confirm or claim a deposit, create a transfer or withdrawal, and reconcile operations by idempotency key.
 - The root operator initializes the instance once, sets supported EVM networks/assets, and configures the gas and collection wallets without exposing their private keys through read APIs.
 
 ## Payment model
 
 - The ledger's sole unit is integer USD micro-dollars. Built-in USDC and USDT maps cover Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon; token amounts are converted exactly to USD micro-dollars, including the 18-decimal BSC assets.
-- A root-configured Etherscan V2 key discovers candidate ERC-20 transaction hashes by incrementally paging each deposit address and chain. The worker polls one address-chain pair per second. When an Etherscan Free Plan excludes a chain, the worker falls back to a narrow recent `Transfer`-log query through that chain's RPC. It never credits either discovery source directly: every candidate is verified against the configured chain RPC receipt and ERC-20 `Transfer` log. The client and integrating API may still submit one transaction hash for immediate verification.
+- The worker polls one address-chain pair per second, using bounded RPC `Transfer`-log queries and a durable cursor to recover from downtime without skipping scanned ranges. It never credits a discovery log directly: every candidate is verified against the configured chain RPC receipt and ERC-20 `Transfer` log. The customer claim endpoint accepts only a chain and TxID; it derives asset and amount from the receipt, and a TxID can be credited only once.
 - A confirmed deposit credits the USD ledger, then queues a two-step collection: the single custody wallet funds native gas and the user's stored deposit key signs the ERC-20 transfer back to that same custody address.
 - Transfers are paired, immutable USD ledger entries and use Linkit's username picker. Withdrawals select a chain and USDC/USDT, reserve the available USD balance, accept a direct same-chain EVM destination, and broadcast only when the custody signer exists. The user can then save that destination from its history.
 
@@ -34,5 +34,5 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 
 - No other fiat valuation or token decimals.
 - No anonymous balance or payment access.
-- No broad block-range/event scanning; a narrow RPC log fallback is used only where the Etherscan Free Plan excludes a supported chain.
+- No unbounded block-range/event scanning; each RPC query is capped to a narrow block range and cursor progress is persisted only after processing succeeds.
 - No arbitrary cross-origin API credentials; integrations use an Auth Mini bearer token for the applicable user.
