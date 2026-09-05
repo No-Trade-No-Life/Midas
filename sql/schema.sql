@@ -139,6 +139,11 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   destination_address TEXT NOT NULL,
   amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros > 0),
   transaction_hash TEXT,
+  -- The signed raw transaction is persisted before it is sent to an RPC. It
+  -- is never returned by an API, and lets an operator safely re-broadcast the
+  -- exact same transaction when the RPC outcome was uncertain.
+  signed_transaction TEXT,
+  last_error TEXT,
   status TEXT NOT NULL CHECK (status IN ('awaiting_signer', 'submitted', 'completed', 'failed')),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

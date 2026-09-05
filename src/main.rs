@@ -15,7 +15,10 @@ use ethers::{
     middleware::SignerMiddleware,
     providers::{Http, Middleware, Provider},
     signers::{LocalWallet, Signer},
-    types::{Address, H256, Log, TransactionRequest, U256},
+    types::{
+        Address, BlockId, BlockNumber, Bytes, H256, Log, TransactionRequest, U256,
+        transaction::eip2718::TypedTransaction,
+    },
     utils::keccak256,
 };
 use rand::thread_rng;
@@ -187,6 +190,7 @@ struct AppState {
     verifier: AuthMiniVerifier,
     write_lock: Arc<Mutex<()>>,
     sweep_lock: Arc<Mutex<()>>,
+    withdrawal_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug)]
@@ -364,6 +368,23 @@ struct AdminDeposit {
 }
 
 #[derive(Serialize)]
+struct AdminWithdrawal {
+    id: String,
+    user_id: String,
+    destination_address: String,
+    asset_symbol: String,
+    chain_id: i64,
+    network_name: String,
+    amount_usd_micros: i64,
+    amount_usd: String,
+    transaction_hash: Option<String>,
+    status: String,
+    last_error: Option<String>,
+    created_at: String,
+    retryable: bool,
+}
+
+#[derive(Serialize)]
 struct AdminBalanceSummary {
     user_count: i64,
     funded_user_count: i64,
@@ -491,6 +512,7 @@ struct WithdrawalTarget {
     amount_usd_micros: i64,
     token_decimals: u8,
     transaction_hash: Option<String>,
+    signed_transaction: Option<String>,
     status: String,
 }
 
@@ -565,6 +587,7 @@ async fn main() -> anyhow::Result<()> {
         verifier,
         write_lock: Arc::new(Mutex::new(())),
         sweep_lock: Arc::new(Mutex::new(())),
+        withdrawal_lock: Arc::new(Mutex::new(())),
     });
     let addr = "127.0.0.1:8787"
         .parse::<SocketAddr>()
@@ -610,6 +633,8 @@ fn app(state: AppState) -> Router {
         .route("/admin/ledger", get(list_admin_ledger))
         .route("/admin/deposits", get(list_admin_deposits))
         .route("/admin/deposits/:id/sweep", post(retry_sweep))
+        .route("/admin/withdrawals", get(list_admin_withdrawals))
+        .route("/admin/withdrawals/:id/retry", post(retry_withdrawal))
         .with_state(state);
     Router::new()
         .nest("/api", api)
@@ -1226,10 +1251,9 @@ async fn create_withdrawal(
     )
     .await?;
     tx.commit().await.map_err(db_error)?;
-    let _ = submit_withdrawal(&state, &withdrawal_id).await;
-    Ok(Json(
-        read_withdrawal_response(&state.db, &withdrawal_id).await?,
-    ))
+    let response = read_withdrawal_response(&state.db, &withdrawal_id).await?;
+    spawn_withdrawal_submission(state.clone(), withdrawal_id);
+    Ok(Json(response))
 }
 
 async fn my_withdrawals(
@@ -1355,8 +1379,25 @@ async fn finalize_withdrawal(
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
+    sqlx::query("UPDATE withdrawals SET last_error=?1 WHERE id=?2")
+        .bind(if succeeded {
+            None
+        } else {
+            Some("the withdrawal transaction reverted on-chain")
+        })
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
     sqlx::query("UPDATE ledger_entries SET status=?1,posted_at=CASE WHEN ?1='posted' THEN ?2 ELSE NULL END WHERE id=(SELECT ledger_entry_id FROM withdrawals WHERE id=?3)")
         .bind(if succeeded { "posted" } else { "rejected" })
+        .bind(&now)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    sqlx::query("UPDATE payment_operations SET status=?1,updated_at=?2 WHERE kind='withdrawal' AND resource_id=?3")
+        .bind(if succeeded { "completed" } else { "failed" })
         .bind(&now)
         .bind(&id)
         .execute(&mut *tx)
@@ -1434,6 +1475,67 @@ async fn list_admin_deposits(
             })
             .collect(),
     ))
+}
+
+async fn list_admin_withdrawals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AdminWithdrawal>>, ApiError> {
+    require_root(&state, &headers).await?;
+    let rows = sqlx::query("SELECT w.id,w.user_id,w.destination_address,a.symbol,n.chain_id,n.name,w.amount_usd_micros,w.transaction_hash,w.signed_transaction,w.status,w.last_error,w.created_at FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id ORDER BY w.created_at DESC,w.id DESC LIMIT 100")
+        .fetch_all(&state.db)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| {
+                let amount_usd_micros: i64 = row.get(6);
+                let transaction_hash: Option<String> = row.get(7);
+                let signed_transaction: Option<String> = row.get(8);
+                let status: String = row.get(9);
+                AdminWithdrawal {
+                    id: row.get(0),
+                    user_id: row.get(1),
+                    destination_address: row.get(2),
+                    asset_symbol: row.get(3),
+                    chain_id: row.get(4),
+                    network_name: row.get(5),
+                    amount_usd_micros,
+                    amount_usd: format_usd(amount_usd_micros),
+                    transaction_hash: transaction_hash.clone(),
+                    status: status.clone(),
+                    last_error: row.get(10),
+                    created_at: row.get(11),
+                    retryable: withdrawal_is_retryable(
+                        &status,
+                        transaction_hash.as_deref(),
+                        signed_transaction.as_deref(),
+                    ),
+                }
+            })
+            .collect(),
+    ))
+}
+
+async fn retry_withdrawal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<WithdrawalResponse>, ApiError> {
+    require_root(&state, &headers).await?;
+    let target = load_withdrawal_target(&state.db, &id, None).await?;
+    if !withdrawal_is_retryable(
+        &target.status,
+        target.transaction_hash.as_deref(),
+        target.signed_transaction.as_deref(),
+    ) {
+        return Err(ApiError::conflict(
+            "this withdrawal cannot be retried without creating a second payment",
+        ));
+    }
+    let response = read_withdrawal_response(&state.db, &id).await?;
+    spawn_withdrawal_submission(state, id);
+    Ok(Json(response))
 }
 
 async fn list_admin_balances(
@@ -1785,50 +1887,226 @@ async fn mark_sweep_configuration(state: &AppState, deposit_id: &str) -> Result<
     Ok(())
 }
 
+fn spawn_withdrawal_submission(state: AppState, withdrawal_id: String) {
+    tokio::spawn(async move {
+        if let Err(error) = submit_withdrawal(&state, &withdrawal_id).await
+            && let Err(record_error) =
+                record_withdrawal_error(&state, &withdrawal_id, &error.message).await
+        {
+            eprintln!(
+                "failed to record withdrawal {withdrawal_id} error after {}: {}",
+                error.message, record_error.message
+            );
+        }
+    });
+}
+
 async fn submit_withdrawal(state: &AppState, withdrawal_id: &str) -> Result<(), ApiError> {
+    let _withdrawal = state.withdrawal_lock.lock().await;
     let target = load_withdrawal_target(&state.db, withdrawal_id, None).await?;
-    if target.status != "awaiting_signer" {
+    if !withdrawal_is_retryable(
+        &target.status,
+        target.transaction_hash.as_deref(),
+        target.signed_transaction.as_deref(),
+    ) {
         return Ok(());
     }
-    let custody_private_key = meta(&state.db, CUSTODY_WALLET_PRIVATE_KEY_KEY)
-        .await
-        .map_err(db_error)?;
-    let Some(custody_private_key) = custody_private_key else {
-        return Ok(());
+    let (provider, signed_transaction) = match target.signed_transaction.as_deref() {
+        Some(raw) => (rpc_provider(&target.rpc_url)?, signed_raw_transaction(raw)?),
+        None => {
+            let (provider, raw, transaction_hash) = sign_withdrawal(&state.db, &target).await?;
+            let _write = state.write_lock.lock().await;
+            persist_signed_withdrawal(&state.db, withdrawal_id, transaction_hash, &raw).await?;
+            (provider, raw)
+        }
     };
-    let custody_address = meta(&state.db, CUSTODY_WALLET_ADDRESS_KEY)
+    provider
+        .send_raw_transaction(signed_transaction)
+        .await
+        .map_err(chain_error)?;
+    clear_withdrawal_error(state, withdrawal_id).await
+}
+
+async fn sign_withdrawal(
+    db: &SqlitePool,
+    target: &WithdrawalTarget,
+) -> Result<(Provider<Http>, Bytes, H256), ApiError> {
+    let custody_private_key = meta(db, CUSTODY_WALLET_PRIVATE_KEY_KEY)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::conflict("custody wallet private key is not configured"))?;
+    let custody_address = meta(db, CUSTODY_WALLET_ADDRESS_KEY)
         .await
         .map_err(db_error)?
         .ok_or_else(|| ApiError::conflict("custody wallet address is not configured"))?;
-    let provider = rpc_provider(&target.rpc_url)?;
     let wallet = parse_wallet(&custody_private_key, target.chain_id)?;
     if wallet.address() != parse_address(&custody_address, "configured custody wallet")? {
         return Err(ApiError::invalid(
             "custody wallet private key does not match its configured address",
         ));
     }
-    let client = Arc::new(SignerMiddleware::new(provider, wallet));
-    let contract = Erc20::new(
-        parse_address(&target.contract_address, "configured token contract")?,
-        client,
-    );
-    let transfer_call = contract.transfer(
-        parse_address(&target.destination_address, "stored withdrawal destination")?,
-        usd_micros_to_token_units(target.amount_usd_micros, target.token_decimals)?,
-    );
-    let pending = transfer_call.send().await.map_err(chain_error)?;
+    let provider = rpc_provider(&target.rpc_url)?;
+    let contract_address = parse_address(&target.contract_address, "configured token contract")?;
+    let transfer_data = Erc20::new(contract_address, Arc::new(provider.clone()))
+        .transfer(
+            parse_address(&target.destination_address, "stored withdrawal destination")?,
+            usd_micros_to_token_units(target.amount_usd_micros, target.token_decimals)?,
+        )
+        .calldata()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not encode withdrawal transaction",
+            )
+        })?;
+    let nonce = provider
+        .get_transaction_count(
+            wallet.address(),
+            Some(BlockId::Number(BlockNumber::Pending)),
+        )
+        .await
+        .map_err(chain_error)?;
+    let gas_price = provider.get_gas_price().await.map_err(chain_error)?;
+    let mut transaction: TypedTransaction = TransactionRequest::new()
+        .from(wallet.address())
+        .to(contract_address)
+        .data(transfer_data)
+        .nonce(nonce)
+        .gas_price(gas_price)
+        .chain_id(target.chain_id as u64)
+        .into();
+    let gas = provider
+        .estimate_gas(&transaction, None)
+        .await
+        .map_err(chain_error)?;
+    transaction.set_gas(gas);
+    let signature = wallet
+        .sign_transaction(&transaction)
+        .await
+        .map_err(chain_error)?;
+    let signed_transaction = transaction.rlp_signed(&signature);
+    let transaction_hash = H256::from(keccak256(signed_transaction.as_ref()));
+    Ok((provider, signed_transaction, transaction_hash))
+}
+
+async fn persist_signed_withdrawal(
+    db: &SqlitePool,
+    withdrawal_id: &str,
+    transaction_hash: H256,
+    signed_transaction: &Bytes,
+) -> Result<(), ApiError> {
     let now = Utc::now().to_rfc3339();
+    let mut tx = db.begin().await.map_err(db_error)?;
+    sqlx::query("UPDATE withdrawals SET transaction_hash=?1,signed_transaction=?2,last_error=NULL,status='submitted',updated_at=?3 WHERE id=?4 AND transaction_hash IS NULL AND signed_transaction IS NULL")
+        .bind(format!("{transaction_hash:#x}"))
+        .bind(format!("0x{}", hex::encode(signed_transaction.as_ref())))
+        .bind(&now)
+        .bind(withdrawal_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    sqlx::query("UPDATE payment_operations SET status='submitted',updated_at=?1 WHERE kind='withdrawal' AND resource_id=?2")
+        .bind(&now)
+        .bind(withdrawal_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)
+}
+
+async fn clear_withdrawal_error(state: &AppState, withdrawal_id: &str) -> Result<(), ApiError> {
     let _write = state.write_lock.lock().await;
+    let now = Utc::now().to_rfc3339();
+    let mut tx = state.db.begin().await.map_err(db_error)?;
     sqlx::query(
-        "UPDATE withdrawals SET transaction_hash=?1,status='submitted',updated_at=?2 WHERE id=?3",
+        "UPDATE withdrawals SET last_error=NULL,updated_at=?1 WHERE id=?2 AND status='submitted'",
     )
-    .bind(format!("{:#x}", pending.tx_hash()))
-    .bind(now)
+    .bind(&now)
     .bind(withdrawal_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(db_error)?;
-    Ok(())
+    sqlx::query("UPDATE payment_operations SET status='submitted',updated_at=?1 WHERE kind='withdrawal' AND resource_id=?2 AND EXISTS(SELECT 1 FROM withdrawals WHERE id=?2 AND status='submitted')")
+        .bind(&now)
+        .bind(withdrawal_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)
+}
+
+async fn record_withdrawal_error(
+    state: &AppState,
+    withdrawal_id: &str,
+    error_message: &str,
+) -> Result<(), ApiError> {
+    let _write = state.write_lock.lock().await;
+    let now = Utc::now().to_rfc3339();
+    let row = sqlx::query("SELECT status,signed_transaction FROM withdrawals WHERE id=?1")
+        .bind(withdrawal_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(db_error)?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let status: String = row.get(0);
+    if !matches!(status.as_str(), "awaiting_signer" | "submitted") {
+        return Ok(());
+    }
+    let signed_transaction: Option<String> = row.get(1);
+    let operation_status = if signed_transaction.is_some() {
+        "submitted"
+    } else {
+        "failed"
+    };
+    let mut tx = state.db.begin().await.map_err(db_error)?;
+    sqlx::query("UPDATE withdrawals SET last_error=?1,updated_at=?2 WHERE id=?3 AND status IN ('awaiting_signer','submitted')")
+        .bind(error_message)
+        .bind(&now)
+        .bind(withdrawal_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    sqlx::query("UPDATE payment_operations SET status=?1,updated_at=?2 WHERE kind='withdrawal' AND resource_id=?3 AND EXISTS(SELECT 1 FROM withdrawals WHERE id=?3 AND status IN ('awaiting_signer','submitted'))")
+        .bind(operation_status)
+        .bind(&now)
+        .bind(withdrawal_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)
+}
+
+fn signed_raw_transaction(value: &str) -> Result<Bytes, ApiError> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored withdrawal signed transaction is invalid",
+        ));
+    }
+    hex::decode(value).map(Bytes::from).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored withdrawal signed transaction is invalid",
+        )
+    })
+}
+
+fn withdrawal_is_retryable(
+    status: &str,
+    transaction_hash: Option<&str>,
+    signed_transaction: Option<&str>,
+) -> bool {
+    matches!(
+        (
+            status,
+            transaction_hash.is_some(),
+            signed_transaction.is_some()
+        ),
+        ("awaiting_signer", false, false) | ("failed", false, false) | ("submitted", true, true)
+    )
 }
 
 async fn load_deposit_target(
@@ -1987,6 +2265,12 @@ async fn load_withdrawal_target(
             return Err(ApiError::forbidden());
         }
     }
+    let signed_transaction: Option<String> =
+        sqlx::query_scalar("SELECT signed_transaction FROM withdrawals WHERE id=?1")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .map_err(db_error)?;
     Ok(WithdrawalTarget {
         contract_address: row.get(0),
         rpc_url: row.get(1),
@@ -1995,6 +2279,7 @@ async fn load_withdrawal_target(
         amount_usd_micros: row.get(4),
         token_decimals: row.get::<i64, _>(5) as u8,
         transaction_hash: row.get(6),
+        signed_transaction,
         status: row.get(7),
     })
 }
@@ -2347,6 +2632,16 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             .execute(db)
             .await?;
     }
+    if !table_has_column(db, "withdrawals", "signed_transaction").await? {
+        sqlx::query("ALTER TABLE withdrawals ADD COLUMN signed_transaction TEXT")
+            .execute(db)
+            .await?;
+    }
+    if !table_has_column(db, "withdrawals", "last_error").await? {
+        sqlx::query("ALTER TABLE withdrawals ADD COLUMN last_error TEXT")
+            .execute(db)
+            .await?;
+    }
     seed_builtin_evm(db).await?;
     migrate_legacy_custody_wallet(db).await?;
     Ok(())
@@ -2451,6 +2746,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(address_book_table, "address_book_entries");
+        assert!(
+            table_has_column(&db, "withdrawals", "signed_transaction")
+                .await
+                .unwrap()
+        );
+        assert!(
+            table_has_column(&db, "withdrawals", "last_error")
+                .await
+                .unwrap()
+        );
         let builtin_assets: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM supported_assets WHERE enabled=1")
                 .fetch_one(&db)
@@ -2479,6 +2784,102 @@ mod tests {
         assert!(sweep_is_retryable("failed"));
         assert!(!sweep_is_retryable("submitted"));
         assert!(!sweep_is_retryable("swept"));
+    }
+
+    #[test]
+    fn withdrawal_retry_never_resigns_a_transaction_with_an_existing_hash() {
+        assert!(withdrawal_is_retryable("awaiting_signer", None, None));
+        assert!(withdrawal_is_retryable("failed", None, None));
+        assert!(withdrawal_is_retryable(
+            "submitted",
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some("0x01")
+        ));
+        assert!(!withdrawal_is_retryable(
+            "submitted",
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            None
+        ));
+        assert!(!withdrawal_is_retryable(
+            "failed",
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            None
+        ));
+        assert!(!withdrawal_is_retryable("completed", None, None));
+    }
+
+    #[tokio::test]
+    async fn signed_withdrawal_is_durable_before_the_broadcast_boundary() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let withdrawal_id = Uuid::new_v4().to_string();
+        let ledger_id = Uuid::new_v4().to_string();
+        let operation_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'withdrawal','pending','56-USDT',1000000,-1000000,?3)")
+            .bind(&ledger_id)
+            .bind(&user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,'56-USDT',?3,'0x0000000000000000000000000000000000000001',1000000,'awaiting_signer',?4,?4)")
+            .bind(&withdrawal_id)
+            .bind(&user_id)
+            .bind(&ledger_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO payment_operations(id,user_id,kind,idempotency_key,resource_id,status,created_at,updated_at) VALUES(?1,?2,'withdrawal','test-withdrawal',?3,'accepted',?4,?4)")
+            .bind(&operation_id)
+            .bind(&user_id)
+            .bind(&withdrawal_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        let raw = Bytes::from(vec![1_u8, 2, 3, 4]);
+        let hash = H256::from(keccak256(raw.as_ref()));
+
+        persist_signed_withdrawal(&db, &withdrawal_id, hash, &raw)
+            .await
+            .unwrap();
+
+        let row = sqlx::query("SELECT transaction_hash,signed_transaction,status,last_error FROM withdrawals WHERE id=?1")
+            .bind(&withdrawal_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let transaction_hash: Option<String> = row.get(0);
+        let signed_transaction: Option<String> = row.get(1);
+        let status: String = row.get(2);
+        let last_error: Option<String> = row.get(3);
+        let expected_hash = format!("{hash:#x}");
+        assert_eq!(transaction_hash.as_deref(), Some(expected_hash.as_str()));
+        assert_eq!(signed_transaction.as_deref(), Some("0x01020304"));
+        assert_eq!(status, "submitted");
+        assert!(last_error.is_none());
+        assert!(withdrawal_is_retryable(
+            &status,
+            transaction_hash.as_deref(),
+            signed_transaction.as_deref()
+        ));
+        let operation_status: String =
+            sqlx::query_scalar("SELECT status FROM payment_operations WHERE id=?1")
+                .bind(&operation_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(operation_status, "submitted");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -2779,6 +3180,16 @@ mod tests {
         );
         assert!(
             table_has_column(&db, "withdrawals", "address_book_entry_id")
+                .await
+                .unwrap()
+        );
+        assert!(
+            table_has_column(&db, "withdrawals", "signed_transaction")
+                .await
+                .unwrap()
+        );
+        assert!(
+            table_has_column(&db, "withdrawals", "last_error")
                 .await
                 .unwrap()
         );
