@@ -24,7 +24,7 @@ use ethers::{
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinSet};
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use uuid::Uuid;
 
@@ -32,6 +32,7 @@ abigen!(
     Erc20,
     r#"[
         function transfer(address to, uint256 amount) returns (bool)
+        function balanceOf(address account) view returns (uint256)
     ]"#,
 );
 
@@ -323,6 +324,28 @@ struct EvmConfig {
 #[derive(Deserialize)]
 struct EvmConfigInput {
     custody_wallet_private_key: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CustodyBalancesResponse {
+    custody_wallet_address: Option<String>,
+    networks: Vec<CustodyNetworkBalances>,
+}
+
+#[derive(Serialize)]
+struct CustodyNetworkBalances {
+    chain_id: i64,
+    network_name: String,
+    native: CustodyAssetBalance,
+    usdc: CustodyAssetBalance,
+    usdt: CustodyAssetBalance,
+}
+
+#[derive(Serialize)]
+struct CustodyAssetBalance {
+    symbol: String,
+    amount: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -629,6 +652,7 @@ fn app(state: AppState) -> Router {
             "/admin/evm-config",
             get(read_evm_config).put(write_evm_config),
         )
+        .route("/admin/custody-balances", get(read_custody_balances))
         .route("/admin/balances", get(list_admin_balances))
         .route("/admin/ledger", get(list_admin_ledger))
         .route("/admin/deposits", get(list_admin_deposits))
@@ -1439,6 +1463,14 @@ async fn write_evm_config(
     }
     tx.commit().await.map_err(db_error)?;
     Ok(Json(load_evm_config(&state.db).await?))
+}
+
+async fn read_custody_balances(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CustodyBalancesResponse>, ApiError> {
+    require_root(&state, &headers).await?;
+    Ok(Json(load_custody_balances(&state.db).await?))
 }
 
 async fn list_admin_deposits(
@@ -2298,6 +2330,104 @@ async fn load_evm_config(db: &SqlitePool) -> Result<EvmConfig, ApiError> {
     })
 }
 
+async fn load_custody_balances(db: &SqlitePool) -> Result<CustodyBalancesResponse, ApiError> {
+    let custody_wallet_address = meta(db, CUSTODY_WALLET_ADDRESS_KEY)
+        .await
+        .map_err(db_error)?;
+    let Some(custody_wallet_address) = custody_wallet_address else {
+        return Ok(CustodyBalancesResponse {
+            custody_wallet_address: None,
+            networks: Vec::new(),
+        });
+    };
+    let address = parse_address(&custody_wallet_address, "configured custody wallet")?;
+    let mut jobs = JoinSet::new();
+    for network in BUILTIN_EVM_NETWORKS {
+        jobs.spawn(async move { load_custody_network_balances(network, address).await });
+    }
+    let mut networks = Vec::with_capacity(BUILTIN_EVM_NETWORKS.len());
+    while let Some(job) = jobs.join_next().await {
+        let network = job.map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "custody balance lookup task stopped unexpectedly",
+            )
+        })?;
+        networks.push(network?);
+    }
+    networks.sort_by_key(|network| network.chain_id);
+    Ok(CustodyBalancesResponse {
+        custody_wallet_address: Some(custody_wallet_address),
+        networks,
+    })
+}
+
+async fn load_custody_network_balances(
+    network: BuiltinEvmNetwork,
+    custody_address: Address,
+) -> Result<CustodyNetworkBalances, ApiError> {
+    let provider = rpc_provider(network.rpc_url)?;
+    let usdc_asset = builtin_asset_for_network(network.chain_id, "USDC");
+    let usdt_asset = builtin_asset_for_network(network.chain_id, "USDT");
+    let usdc_contract = parse_address(usdc_asset.contract_address, "configured token contract")?;
+    let usdt_contract = parse_address(usdt_asset.contract_address, "configured token contract")?;
+    let usdc = Erc20::new(usdc_contract, Arc::new(provider.clone()));
+    let usdt = Erc20::new(usdt_contract, Arc::new(provider.clone()));
+    let usdc_call = usdc.balance_of(custody_address);
+    let usdt_call = usdt.balance_of(custody_address);
+    let (native_result, usdc_result, usdt_result) = tokio::join!(
+        provider.get_balance(custody_address, None),
+        usdc_call.call(),
+        usdt_call.call(),
+    );
+    Ok(CustodyNetworkBalances {
+        chain_id: network.chain_id,
+        network_name: network.name.to_string(),
+        native: custody_asset_balance(native_asset_symbol(network.chain_id), 18, native_result),
+        usdc: custody_asset_balance(usdc_asset.symbol, usdc_asset.token_decimals, usdc_result),
+        usdt: custody_asset_balance(usdt_asset.symbol, usdt_asset.token_decimals, usdt_result),
+    })
+}
+
+fn custody_asset_balance<E: std::fmt::Display>(
+    symbol: &str,
+    decimals: u8,
+    result: Result<U256, E>,
+) -> CustodyAssetBalance {
+    match result {
+        Ok(amount) => CustodyAssetBalance {
+            symbol: symbol.to_string(),
+            amount: Some(format_token_amount(amount, decimals)),
+            error: None,
+        },
+        Err(error) => CustodyAssetBalance {
+            symbol: symbol.to_string(),
+            amount: None,
+            error: Some(format!("EVM RPC operation failed: {error}")),
+        },
+    }
+}
+
+fn format_token_amount(amount: U256, decimals: u8) -> String {
+    let scale = U256::exp10(decimals as usize);
+    let whole = amount / scale;
+    let fractional = amount % scale;
+    if fractional.is_zero() {
+        return whole.to_string();
+    }
+    let digits = fractional.to_string();
+    let padded = format!("{}{}", "0".repeat(decimals as usize - digits.len()), digits);
+    format!("{whole}.{}", padded.trim_end_matches('0'))
+}
+
+fn native_asset_symbol(chain_id: i64) -> &'static str {
+    match chain_id {
+        56 => "BNB",
+        137 => "POL",
+        _ => "ETH",
+    }
+}
+
 fn builtin_network(chain_id: i64) -> Option<BuiltinEvmNetwork> {
     BUILTIN_EVM_NETWORKS
         .iter()
@@ -2307,6 +2437,14 @@ fn builtin_network(chain_id: i64) -> Option<BuiltinEvmNetwork> {
 
 fn builtin_asset(id: &str) -> Option<BuiltinAsset> {
     BUILTIN_ASSETS.iter().copied().find(|asset| asset.id == id)
+}
+
+fn builtin_asset_for_network(chain_id: i64, symbol: &str) -> BuiltinAsset {
+    BUILTIN_ASSETS
+        .iter()
+        .copied()
+        .find(|asset| asset.chain_id == chain_id && asset.symbol == symbol)
+        .expect("every builtin network has USDC and USDT")
 }
 
 fn builtin_networks() -> Vec<EvmNetwork> {
@@ -2775,6 +2913,40 @@ mod tests {
     fn formats_usd_micros() {
         assert_eq!(format_usd(1_250_000), "1.250000");
         assert_eq!(format_usd(-1), "-0.000001");
+    }
+
+    #[test]
+    fn formats_native_and_token_balances_without_float_rounding() {
+        assert_eq!(format_token_amount(U256::zero(), 18), "0");
+        assert_eq!(format_token_amount(U256::from(1_250_000_u64), 6), "1.25");
+        assert_eq!(
+            format_token_amount(U256::from(1_u64), 18),
+            "0.000000000000000001"
+        );
+        assert_eq!(native_asset_symbol(1), "ETH");
+        assert_eq!(native_asset_symbol(56), "BNB");
+        assert_eq!(native_asset_symbol(137), "POL");
+    }
+
+    #[test]
+    fn custody_asset_balance_keeps_a_per_asset_rpc_error_visible() {
+        let balance = custody_asset_balance("USDC", 6, Err::<U256, _>("offline RPC"));
+        assert_eq!(balance.symbol, "USDC");
+        assert!(balance.amount.is_none());
+        assert!(balance.error.unwrap().contains("offline RPC"));
+    }
+
+    #[tokio::test]
+    async fn custody_balance_lookup_without_a_configured_wallet_skips_rpc_calls() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+
+        let balances = load_custody_balances(&db).await.unwrap();
+
+        assert!(balances.custody_wallet_address.is_none());
+        assert!(balances.networks.is_empty());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

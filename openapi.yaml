@@ -151,6 +151,15 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/EvmConfigInput' }
       responses: { '200': { description: Saved configuration } }
+  /admin/custody-balances:
+    get:
+      summary: Root-only live custody wallet balances for native assets, USDC, and USDT on every built-in EVM network
+      responses:
+        '200':
+          description: Each asset independently reports its exact decimal balance or its RPC lookup error. Private keys and signed transaction data are never returned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodyBalancesResponse' }
   /admin/balances:
     get:
       summary: Root-only all-user USD balance list and aggregate settlement exposure
@@ -331,6 +340,30 @@ components:
       type: object
       properties:
         custody_wallet_private_key: { type: string, writeOnly: true, description: "One EVM key funds gas, collects deposits, and signs withdrawals. Its address is derived server-side." }
+    CustodyAssetBalance:
+      type: object
+      required: [symbol, amount, error]
+      properties:
+        symbol: { type: string, example: ETH }
+        amount: { type: [string, 'null'], description: Exact decimal balance, without floating-point rounding. }
+        error: { type: [string, 'null'], description: Present only when this individual RPC lookup failed. }
+    CustodyNetworkBalances:
+      type: object
+      required: [chain_id, network_name, native, usdc, usdt]
+      properties:
+        chain_id: { type: integer, enum: [1, 10, 56, 137, 8453, 42161] }
+        network_name: { type: string }
+        native: { $ref: '#/components/schemas/CustodyAssetBalance' }
+        usdc: { $ref: '#/components/schemas/CustodyAssetBalance' }
+        usdt: { $ref: '#/components/schemas/CustodyAssetBalance' }
+    CustodyBalancesResponse:
+      type: object
+      required: [custody_wallet_address, networks]
+      properties:
+        custody_wallet_address: { type: [string, 'null'], pattern: '^0x[a-fA-F0-9]{40}$' }
+        networks:
+          type: array
+          items: { $ref: '#/components/schemas/CustodyNetworkBalances' }
     AdminDeposit:
       type: object
       required: [id, user_id, deposit_address, asset_symbol, chain_id, network_name, amount_usd_micros, amount_usd, transaction_hash, sweep_status, created_at, sweep_operation_status, sweep_updated_at]
