@@ -53,6 +53,23 @@ CREATE TABLE IF NOT EXISTS wallet_private_keys (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- One durable cursor per user deposit address and EVM network. The worker uses
+-- Etherscan candidate transaction hashes, or a narrow RPC log fallback when a
+-- Free Plan excludes that chain. Midas still verifies the matching receipt and
+-- Transfer log through the configured chain RPC.
+CREATE TABLE IF NOT EXISTS deposit_discovery_cursors (
+  wallet_address_id TEXT NOT NULL REFERENCES wallet_addresses(id) ON DELETE CASCADE,
+  chain_id INTEGER NOT NULL REFERENCES evm_networks(chain_id),
+  next_block_number INTEGER NOT NULL DEFAULT 0 CHECK (next_block_number >= 0),
+  next_page INTEGER NOT NULL DEFAULT 1 CHECK (next_page >= 1),
+  last_seen_block_number INTEGER NOT NULL DEFAULT 0 CHECK (last_seen_block_number >= 0),
+  last_attempt_at TEXT,
+  last_success_at TEXT,
+  last_error TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(wallet_address_id, chain_id)
+);
+
 CREATE TABLE IF NOT EXISTS ledger_entries (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
@@ -151,6 +168,8 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 
 CREATE INDEX IF NOT EXISTS deposits_user_created_idx
   ON deposits(user_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS deposit_discovery_cursors_last_attempt_idx
+  ON deposit_discovery_cursors(last_attempt_at ASC, wallet_address_id, chain_id);
 CREATE INDEX IF NOT EXISTS withdrawals_user_created_idx
   ON withdrawals(user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS address_book_entries_user_chain_idx
