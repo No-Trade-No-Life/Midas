@@ -14,7 +14,8 @@
 - A scannable QR code for the dedicated deposit address.
 - Linkit React Components, including `LinkitAppHeaderUser` and `LinkitUserPicker` for username-based transfer recipients.
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
-- Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. A destination can be saved and labelled from its withdrawal history afterward.
+- Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
+- Automatic-payment agreements: an owner creates a channel and receives an API key once; a customer explicitly authorizes the channel through a signed-in GUI page; its API key can then make an idempotent USD charge only against that customer's available balance, paired with an immutable credit to the owner.
 - OpenAPI contract and CI foundation.
 
 ## Architecture
@@ -46,8 +47,12 @@ Midas records **USD only** in integer micro-dollars. Future USDC/USDT chain meta
 | `ledger_entries` | Immutable USD balance deltas and payment history |
 | `payment_operations` | Per-user idempotency keys for payment writes |
 | `deposits`, `deposit_sweeps` | Confirmed deposits and the two-step collection state |
-| `address_book_entries` | Per-user, per-chain approved withdrawal destinations |
+| `address_book_entries` | Legacy per-user, per-chain approved withdrawal destinations |
+| `withdrawal_target_notes` | User notes for broadcast withdrawal address × network × token targets |
 | `internal_transfers`, `withdrawals` | Atomic internal transfers and direct-destination chain withdrawal state |
+| `payment_agreements` | Owner-created payment channels with only a one-way API-key hash and non-secret prefix |
+| `payment_agreement_bindings` | Explicit user authorization for automatic-payment channels |
+| `payment_agreement_charges` | Agreement-scoped idempotent charges and their paired ledger entries |
 
 ## Local development
 
@@ -76,12 +81,21 @@ GET /api/wallet-addresses/me
 POST /api/deposits/confirm
 POST /api/deposits/claim
 POST /api/transfers
-GET/POST /api/address-book/me
-PUT/DELETE /api/address-book/me/{id}
+GET/PUT /api/withdrawal-targets/me
+DELETE /api/withdrawal-targets/me/{id}
 POST /api/withdrawals
-POST /api/withdrawals/{id}/address-book
 POST /api/withdrawals/{id}/finalize
+GET/POST /api/agreements/owned
+GET /api/agreements/bindings/me
+GET /api/agreements/{id}
+POST/DELETE /api/agreements/{id}/bind
 ```
+
+An external payment channel charges with `POST /api/agreements/{id}/charges`, an
+`X-Api-Key` issued at channel creation, and an `Idempotency-Key`. It supplies
+the already-authorized `user_id` and exact `amount_usd_micros`; Midas rejects
+unbound users and insufficient available balances without changing either
+ledger.
 
 The API contract is in [`openapi.yaml`](./openapi.yaml). Midas verifies every credited deposit and withdrawal receipt independently. RPC logs only discover candidates; Midas never trusts a log for token, recipient, amount, or final success state.
 
