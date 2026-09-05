@@ -16,8 +16,8 @@ use ethers::{
     providers::{Http, Middleware, Provider},
     signers::{LocalWallet, Signer},
     types::{
-        Address, BlockId, BlockNumber, Bytes, H256, Log, TransactionRequest, U256,
-        transaction::eip2718::TypedTransaction,
+        Address, BlockId, BlockNumber, Bytes, H256, Log, TransactionReceipt, TransactionRequest,
+        U256, transaction::eip2718::TypedTransaction,
     },
     utils::keccak256,
 };
@@ -79,7 +79,7 @@ const BUILTIN_EVM_NETWORKS: [BuiltinEvmNetwork; 6] = [
     BuiltinEvmNetwork {
         chain_id: 8453,
         name: "Base",
-        rpc_url: "https://base-rpc.publicnode.com",
+        rpc_url: "https://mainnet.base.org",
     },
     BuiltinEvmNetwork {
         chain_id: 42161,
@@ -605,13 +605,15 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("initialize Auth Mini verifier")?;
-    let app = app(AppState {
+    let state = AppState {
         db,
         verifier,
         write_lock: Arc::new(Mutex::new(())),
         sweep_lock: Arc::new(Mutex::new(())),
         withdrawal_lock: Arc::new(Mutex::new(())),
-    });
+    };
+    resume_submitted_withdrawals(state.clone());
+    let app = app(state);
     let addr = "127.0.0.1:8787"
         .parse::<SocketAddr>()
         .context("parse Midas listener address")?;
@@ -1392,14 +1394,29 @@ async fn finalize_withdrawal(
         .await
         .map_err(chain_error)?
         .ok_or_else(|| ApiError::conflict("the withdrawal transaction is not confirmed yet"))?;
-    let succeeded = receipt.status.map(|status| status.as_u64()) == Some(1);
+    settle_withdrawal(
+        &state.db,
+        &state.write_lock,
+        &id,
+        receipt.status.map(|status| status.as_u64()) == Some(1),
+    )
+    .await?;
+    Ok(Json(read_withdrawal_response(&state.db, &id).await?))
+}
+
+async fn settle_withdrawal(
+    db: &SqlitePool,
+    write_lock: &Mutex<()>,
+    withdrawal_id: &str,
+    succeeded: bool,
+) -> Result<(), ApiError> {
     let now = Utc::now().to_rfc3339();
-    let _write = state.write_lock.lock().await;
-    let mut tx = state.db.begin().await.map_err(db_error)?;
+    let _write = write_lock.lock().await;
+    let mut tx = db.begin().await.map_err(db_error)?;
     sqlx::query("UPDATE withdrawals SET status=?1,updated_at=?2 WHERE id=?3")
         .bind(if succeeded { "completed" } else { "failed" })
         .bind(&now)
-        .bind(&id)
+        .bind(withdrawal_id)
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
@@ -1409,26 +1426,26 @@ async fn finalize_withdrawal(
         } else {
             Some("the withdrawal transaction reverted on-chain")
         })
-        .bind(&id)
+        .bind(withdrawal_id)
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
     sqlx::query("UPDATE ledger_entries SET status=?1,posted_at=CASE WHEN ?1='posted' THEN ?2 ELSE NULL END WHERE id=(SELECT ledger_entry_id FROM withdrawals WHERE id=?3)")
         .bind(if succeeded { "posted" } else { "rejected" })
         .bind(&now)
-        .bind(&id)
+        .bind(withdrawal_id)
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
     sqlx::query("UPDATE payment_operations SET status=?1,updated_at=?2 WHERE kind='withdrawal' AND resource_id=?3")
         .bind(if succeeded { "completed" } else { "failed" })
         .bind(&now)
-        .bind(&id)
+        .bind(withdrawal_id)
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
-    Ok(Json(read_withdrawal_response(&state.db, &id).await?))
+    Ok(())
 }
 
 async fn read_evm_config(
@@ -1933,30 +1950,129 @@ fn spawn_withdrawal_submission(state: AppState, withdrawal_id: String) {
     });
 }
 
-async fn submit_withdrawal(state: &AppState, withdrawal_id: &str) -> Result<(), ApiError> {
-    let _withdrawal = state.withdrawal_lock.lock().await;
-    let target = load_withdrawal_target(&state.db, withdrawal_id, None).await?;
-    if !withdrawal_is_retryable(
-        &target.status,
-        target.transaction_hash.as_deref(),
-        target.signed_transaction.as_deref(),
-    ) {
-        return Ok(());
-    }
-    let (provider, signed_transaction) = match target.signed_transaction.as_deref() {
-        Some(raw) => (rpc_provider(&target.rpc_url)?, signed_raw_transaction(raw)?),
-        None => {
-            let (provider, raw, transaction_hash) = sign_withdrawal(&state.db, &target).await?;
-            let _write = state.write_lock.lock().await;
-            persist_signed_withdrawal(&state.db, withdrawal_id, transaction_hash, &raw).await?;
-            (provider, raw)
+fn resume_submitted_withdrawals(state: AppState) {
+    tokio::spawn(async move {
+        let ids: Result<Vec<String>, _> = sqlx::query_scalar(
+            "SELECT id FROM withdrawals WHERE status='submitted' AND transaction_hash IS NOT NULL",
+        )
+        .fetch_all(&state.db)
+        .await;
+        let Ok(ids) = ids else {
+            eprintln!("failed to load submitted withdrawals for recovery");
+            return;
+        };
+        for id in ids {
+            spawn_withdrawal_submission(state.clone(), id);
         }
+    });
+}
+
+async fn submit_withdrawal(state: &AppState, withdrawal_id: &str) -> Result<(), ApiError> {
+    let (provider, transaction_hash) = {
+        let _withdrawal = state.withdrawal_lock.lock().await;
+        let target = load_withdrawal_target(&state.db, withdrawal_id, None).await?;
+        if target.status == "submitted" && settle_submitted_withdrawal(state, withdrawal_id).await?
+        {
+            return Ok(());
+        }
+        if !withdrawal_is_retryable(
+            &target.status,
+            target.transaction_hash.as_deref(),
+            target.signed_transaction.as_deref(),
+        ) {
+            return Ok(());
+        }
+        let (provider, signed_transaction, transaction_hash) = match target
+            .signed_transaction
+            .as_deref()
+        {
+            Some(raw) => (
+                rpc_provider(&target.rpc_url)?,
+                signed_raw_transaction(raw)?,
+                H256::from_str(
+                    target
+                        .transaction_hash
+                        .as_deref()
+                        .expect("retryable submitted withdrawal has a transaction hash"),
+                )
+                .map_err(|_| ApiError::invalid("stored withdrawal transaction hash is invalid"))?,
+            ),
+            None => {
+                let (provider, raw, transaction_hash) = sign_withdrawal(&state.db, &target).await?;
+                let _write = state.write_lock.lock().await;
+                persist_signed_withdrawal(&state.db, withdrawal_id, transaction_hash, &raw).await?;
+                (provider, raw, transaction_hash)
+            }
+        };
+        match provider.send_raw_transaction(signed_transaction).await {
+            Ok(_) => {}
+            Err(error) if error.to_string().contains("already known") => {}
+            Err(error) => return Err(chain_error(error)),
+        }
+        (provider, transaction_hash)
     };
-    provider
-        .send_raw_transaction(signed_transaction)
+    let receipt = wait_for_transaction_receipt(&provider, transaction_hash).await?;
+    settle_withdrawal(
+        &state.db,
+        &state.write_lock,
+        withdrawal_id,
+        receipt.status.map(|status| status.as_u64()) == Some(1),
+    )
+    .await
+}
+
+async fn settle_submitted_withdrawal(
+    state: &AppState,
+    withdrawal_id: &str,
+) -> Result<bool, ApiError> {
+    let target = load_withdrawal_target(&state.db, withdrawal_id, None).await?;
+    let Some(receipt) = withdrawal_transaction_receipt(&target).await? else {
+        return Ok(false);
+    };
+    settle_withdrawal(
+        &state.db,
+        &state.write_lock,
+        withdrawal_id,
+        receipt.status.map(|status| status.as_u64()) == Some(1),
+    )
+    .await?;
+    Ok(true)
+}
+
+async fn withdrawal_transaction_receipt(
+    target: &WithdrawalTarget,
+) -> Result<Option<TransactionReceipt>, ApiError> {
+    let tx_hash = target
+        .transaction_hash
+        .as_deref()
+        .ok_or_else(|| ApiError::conflict("the withdrawal has not been broadcast"))?;
+    rpc_provider(&target.rpc_url)?
+        .get_transaction_receipt(
+            H256::from_str(tx_hash)
+                .map_err(|_| ApiError::invalid("stored withdrawal transaction hash is invalid"))?,
+        )
         .await
-        .map_err(chain_error)?;
-    clear_withdrawal_error(state, withdrawal_id).await
+        .map_err(chain_error)
+}
+
+async fn wait_for_transaction_receipt(
+    provider: &Provider<Http>,
+    transaction_hash: H256,
+) -> Result<TransactionReceipt, ApiError> {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if let Some(receipt) = provider
+                .get_transaction_receipt(transaction_hash)
+                .await
+                .map_err(chain_error)?
+            {
+                return Ok(receipt);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .map_err(|_| ApiError::conflict("the withdrawal transaction confirmation timed out"))?
 }
 
 async fn sign_withdrawal(
@@ -2038,27 +2154,6 @@ async fn persist_signed_withdrawal(
         .await
         .map_err(db_error)?;
     sqlx::query("UPDATE payment_operations SET status='submitted',updated_at=?1 WHERE kind='withdrawal' AND resource_id=?2")
-        .bind(&now)
-        .bind(withdrawal_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_error)?;
-    tx.commit().await.map_err(db_error)
-}
-
-async fn clear_withdrawal_error(state: &AppState, withdrawal_id: &str) -> Result<(), ApiError> {
-    let _write = state.write_lock.lock().await;
-    let now = Utc::now().to_rfc3339();
-    let mut tx = state.db.begin().await.map_err(db_error)?;
-    sqlx::query(
-        "UPDATE withdrawals SET last_error=NULL,updated_at=?1 WHERE id=?2 AND status='submitted'",
-    )
-    .bind(&now)
-    .bind(withdrawal_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_error)?;
-    sqlx::query("UPDATE payment_operations SET status='submitted',updated_at=?1 WHERE kind='withdrawal' AND resource_id=?2 AND EXISTS(SELECT 1 FROM withdrawals WHERE id=?2 AND status='submitted')")
         .bind(&now)
         .bind(withdrawal_id)
         .execute(&mut *tx)
@@ -3051,6 +3146,32 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(operation_status, "submitted");
+
+        let settlement_lock = Mutex::new(());
+        settle_withdrawal(&db, &settlement_lock, &withdrawal_id, true)
+            .await
+            .unwrap();
+        let withdrawal_status: String =
+            sqlx::query_scalar("SELECT status FROM withdrawals WHERE id=?1")
+                .bind(&withdrawal_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let ledger_status: String =
+            sqlx::query_scalar("SELECT status FROM ledger_entries WHERE id=?1")
+                .bind(&ledger_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let operation_status: String =
+            sqlx::query_scalar("SELECT status FROM payment_operations WHERE id=?1")
+                .bind(&operation_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(withdrawal_status, "completed");
+        assert_eq!(ledger_status, "posted");
+        assert_eq!(operation_status, "completed");
         let _ = std::fs::remove_file(path);
     }
 
@@ -3249,6 +3370,10 @@ mod tests {
     fn builtin_evm_assets_cover_common_networks_with_exact_usd_scaling() {
         assert_eq!(BUILTIN_EVM_NETWORKS.len(), 6);
         assert_eq!(BUILTIN_ASSETS.len(), 12);
+        assert_eq!(
+            builtin_network(8453).unwrap().rpc_url,
+            "https://mainnet.base.org"
+        );
         assert_eq!(builtin_asset("1-USDC").unwrap().token_decimals, 6);
         assert_eq!(builtin_asset("56-USDC").unwrap().token_decimals, 18);
         assert_eq!(builtin_asset("8453-USDT").unwrap().chain_id, 8453);
