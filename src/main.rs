@@ -642,7 +642,7 @@ struct PaymentAgreement {
 }
 
 #[derive(Serialize)]
-struct PaymentAgreementCreated {
+struct PaymentAgreementApiKey {
     agreement: PaymentAgreement,
     api_key: String,
 }
@@ -786,6 +786,10 @@ fn app(state: AppState) -> Router {
         .route(
             "/agreements/:id/bind",
             post(bind_payment_agreement).delete(unbind_payment_agreement),
+        )
+        .route(
+            "/agreements/:id/api-key",
+            post(rotate_payment_agreement_api_key),
         )
         .route("/agreements/:id/charges", post(charge_payment_agreement))
         .route(
@@ -1633,17 +1637,14 @@ async fn create_payment_agreement(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<PaymentAgreementInput>,
-) -> Result<Json<PaymentAgreementCreated>, ApiError> {
+) -> Result<Json<PaymentAgreement>, ApiError> {
     let owner_user_id = require_initialized_user(&state, &headers).await?;
     let name = payment_agreement_name(&input.name)?;
-    let api_key = new_payment_agreement_api_key();
-    let api_key_hash = payment_agreement_api_key_hash(&api_key);
-    let api_key_prefix: String = api_key.chars().take(24).collect();
     let agreement = PaymentAgreement {
         id: Uuid::new_v4().to_string(),
         owner_user_id,
         name,
-        api_key_prefix,
+        api_key_prefix: "not issued".to_string(),
         created_at: Utc::now().to_rfc3339(),
         updated_at: Utc::now().to_rfc3339(),
     };
@@ -1652,14 +1653,14 @@ async fn create_payment_agreement(
         .bind(&agreement.id)
         .bind(&agreement.owner_user_id)
         .bind(&agreement.name)
-        .bind(api_key_hash)
+        .bind(payment_agreement_api_key_hash(&new_payment_agreement_api_key()))
         .bind(&agreement.api_key_prefix)
         .bind(&agreement.created_at)
         .bind(&agreement.updated_at)
         .execute(&state.db)
         .await
         .map_err(db_error)?;
-    Ok(Json(PaymentAgreementCreated { agreement, api_key }))
+    Ok(Json(agreement))
 }
 
 async fn payment_agreement_detail(
@@ -1685,32 +1686,82 @@ async fn bind_payment_agreement(
 ) -> Result<Json<PaymentAgreementBinding>, ApiError> {
     let user_id = require_initialized_user(&state, &headers).await?;
     let agreement = read_payment_agreement(&state.db, &id).await?;
-    if agreement.owner_user_id == user_id {
-        return Err(ApiError::invalid(
-            "the agreement owner cannot bind their own payment channel",
-        ));
-    }
-    let now = Utc::now().to_rfc3339();
     let _write = state.write_lock.lock().await;
-    sqlx::query("INSERT OR IGNORE INTO payment_agreement_bindings(agreement_id,user_id,created_at) VALUES(?1,?2,?3)")
-        .bind(&agreement.id)
-        .bind(&user_id)
-        .bind(&now)
-        .execute(&state.db)
-        .await
-        .map_err(db_error)?;
-    let created_at: String = sqlx::query_scalar(
-        "SELECT created_at FROM payment_agreement_bindings WHERE agreement_id=?1 AND user_id=?2",
-    )
-    .bind(&agreement.id)
-    .bind(user_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(db_error)?;
+    let created_at = create_payment_agreement_binding(&state.db, &agreement.id, &user_id).await?;
     Ok(Json(PaymentAgreementBinding {
         agreement,
         created_at,
     }))
+}
+
+async fn create_payment_agreement_binding(
+    db: &SqlitePool,
+    agreement_id: &str,
+    user_id: &str,
+) -> Result<String, ApiError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("INSERT OR IGNORE INTO payment_agreement_bindings(agreement_id,user_id,created_at) VALUES(?1,?2,?3)")
+        .bind(agreement_id)
+        .bind(user_id)
+        .bind(&now)
+        .execute(db)
+        .await
+        .map_err(db_error)?;
+    sqlx::query_scalar(
+        "SELECT created_at FROM payment_agreement_bindings WHERE agreement_id=?1 AND user_id=?2",
+    )
+    .bind(agreement_id)
+    .bind(user_id)
+    .fetch_one(db)
+    .await
+    .map_err(db_error)
+}
+
+async fn rotate_payment_agreement_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<PaymentAgreementApiKey>, ApiError> {
+    let user_id = require_initialized_user(&state, &headers).await?;
+    let _write = state.write_lock.lock().await;
+    Ok(Json(
+        rotate_payment_agreement_api_key_for_owner(&state.db, &id, &user_id).await?,
+    ))
+}
+
+async fn rotate_payment_agreement_api_key_for_owner(
+    db: &SqlitePool,
+    agreement_id: &str,
+    owner_user_id: &str,
+) -> Result<PaymentAgreementApiKey, ApiError> {
+    let agreement = read_payment_agreement(db, agreement_id).await?;
+    if agreement.owner_user_id != owner_user_id {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "payment channel owner access is required",
+        ));
+    }
+    let api_key = new_payment_agreement_api_key();
+    let api_key_prefix: String = api_key.chars().take(24).collect();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE payment_agreements SET api_key_hash=?1,api_key_prefix=?2,updated_at=?3 WHERE id=?4",
+    )
+    .bind(payment_agreement_api_key_hash(&api_key))
+    .bind(&api_key_prefix)
+    .bind(&now)
+    .bind(&agreement.id)
+    .execute(db)
+    .await
+    .map_err(db_error)?;
+    Ok(PaymentAgreementApiKey {
+        agreement: PaymentAgreement {
+            api_key_prefix,
+            updated_at: now,
+            ..agreement
+        },
+        api_key,
+    })
 }
 
 async fn unbind_payment_agreement(
@@ -4882,6 +4933,95 @@ mod tests {
                 .label
                 .is_none()
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn agreement_owner_can_bind_their_own_payment_channel() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let owner_user_id = Uuid::new_v4().to_string();
+        let agreement_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&owner_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO payment_agreements(id,owner_user_id,name,api_key_hash,api_key_prefix,created_at,updated_at) VALUES(?1,?2,'Internal billing','hash','midas_agreement_test',?3,?3)")
+            .bind(&agreement_id)
+            .bind(&owner_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        let binding_created_at =
+            create_payment_agreement_binding(&db, &agreement_id, &owner_user_id)
+                .await
+                .unwrap();
+        assert!(!binding_created_at.is_empty());
+        assert_eq!(
+            create_payment_agreement_binding(&db, &agreement_id, &owner_user_id)
+                .await
+                .unwrap(),
+            binding_created_at
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM payment_agreement_bindings WHERE agreement_id=?1 AND user_id=?2")
+                .bind(&agreement_id)
+                .bind(&owner_user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_can_rotate_an_agreement_api_key() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let owner_user_id = Uuid::new_v4().to_string();
+        let other_user_id = Uuid::new_v4().to_string();
+        let agreement_id = Uuid::new_v4().to_string();
+        let old_api_key = "midas_agreement_old";
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1),(?2)")
+            .bind(&owner_user_id)
+            .bind(&other_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO payment_agreements(id,owner_user_id,name,api_key_hash,api_key_prefix,created_at,updated_at) VALUES(?1,?2,'Internal billing',?3,'midas_agreement_old',?4,?4)")
+            .bind(&agreement_id)
+            .bind(&owner_user_id)
+            .bind(payment_agreement_api_key_hash(old_api_key))
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        let rotated =
+            rotate_payment_agreement_api_key_for_owner(&db, &agreement_id, &owner_user_id)
+                .await
+                .unwrap();
+        assert_ne!(rotated.api_key, old_api_key);
+        assert!(
+            read_payment_agreement_for_api_key(&db, &agreement_id, &rotated.api_key)
+                .await
+                .is_ok()
+        );
+        assert!(
+            read_payment_agreement_for_api_key(&db, &agreement_id, old_api_key)
+                .await
+                .is_err()
+        );
+        match rotate_payment_agreement_api_key_for_owner(&db, &agreement_id, &other_user_id).await {
+            Err(error) => assert_eq!(error.status, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("a non-owner rotated the agreement API key"),
+        }
         let _ = std::fs::remove_file(path);
     }
 

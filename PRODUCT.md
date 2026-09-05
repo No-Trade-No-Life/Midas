@@ -8,7 +8,7 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 
 - A customer opens Midas on a phone, finds their dedicated EVM deposit address, sends a supported stablecoin, checks the USD balance after automatic discovery, can claim a missed deposit by network and TxID, transfers to another Midas user, withdraws, and reviews their immutable history.
 - An integrating application such as 1Exchange uses the bearer-authenticated API to show a balance, obtain a deposit address, confirm or claim a deposit, create a transfer or withdrawal, and reconcile operations by idempotency key.
-- A channel owner creates an automatic-payment agreement and receives its API key once. A customer signs in to a focused authorization page before the channel can charge the customer's available balance.
+- A channel owner creates an automatic-payment agreement, then explicitly rotates its API key and receives that value once. Any Midas user, including the owner, signs in to a focused authorization page before the channel can charge that user's available balance.
 - The root operator initializes the instance once, sets supported EVM networks/assets, and configures the gas and collection wallets without exposing their private keys through read APIs.
 
 ## Payment model
@@ -18,7 +18,7 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 - A confirmed deposit credits the USD ledger, then queues a two-step collection: the single custody wallet funds native gas and the user's stored deposit key signs the ERC-20 transfer back to that same custody address.
 - Transfers are paired, immutable USD ledger entries and use Linkit's username picker. Withdrawals select a chain and USDC/USDT, reserve the available USD balance, accept a direct same-chain EVM destination, and broadcast only when the custody signer exists. The user can then save that destination from its history.
 - Broadcast withdrawal destinations are grouped by exact address, network, and token. The user may save a note for each target and select it again in the withdrawal drawer.
-- Automatic-payment charges use a channel-scoped idempotency key, require a currently bound payer, and create a paired immutable `transfer_out` / `transfer_in` ledger entry. The API key is stored only as a hash and its plaintext value is displayed only when a channel is created.
+- Automatic-payment charges use a channel-scoped idempotency key, require a currently bound payer, and create a paired immutable `transfer_out` / `transfer_in` ledger entry. The API key is stored only as a hash; rotation immediately invalidates its predecessor and displays the replacement once.
 
 ## Trust and operational boundary
 
