@@ -5,9 +5,13 @@ info:
   description: >-
     USD-denominated payment ledger for built-in EVM USDC and USDT on Ethereum,
     BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. Midas does not
-    block-scan: a client submits a specific confirmed transaction hash for deposit
-    verification. Payment writes require an Auth Mini bearer token and an
-    Idempotency-Key header.
+    discovers candidate ERC-20 transaction hashes incrementally through a
+    root-configured Etherscan V2 key. Where an Etherscan Free Plan excludes a
+    supported chain, Midas uses a narrow recent RPC Transfer-log fallback. Every
+    candidate is verified through the configured chain RPC before crediting. The
+    explicit deposit-confirmation endpoint remains available for integrations.
+    Payment writes require an Auth Mini bearer token and an Idempotency-Key
+    header.
 servers:
   - url: https://midas.ntnl.io/api
 security:
@@ -151,6 +155,21 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/EvmConfigInput' }
       responses: { '200': { description: Saved configuration } }
+  /admin/etherscan-config:
+    get:
+      summary: Root-only Etherscan V2 discovery configuration; never returns the API key
+      responses: { '200': { description: Discovery configuration and latest worker status, content: { application/json: { schema: { $ref: '#/components/schemas/EtherscanConfig' } } } } }
+    put:
+      summary: Root-only write-only Etherscan V2 API key configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EtherscanConfigInput' }
+      responses: { '200': { description: Saved discovery configuration } }
+    delete:
+      summary: Root-only removal of the Etherscan V2 API key
+      responses: { '204': { description: API key removed } }
   /admin/custody-balances:
     get:
       summary: Root-only live custody wallet balances for native assets, USDC, and USDT on every built-in EVM network
@@ -340,6 +359,20 @@ components:
       type: object
       properties:
         custody_wallet_private_key: { type: string, writeOnly: true, description: "One EVM key funds gas, collects deposits, and signs withdrawals. Its address is derived server-side." }
+    EtherscanConfigInput:
+      type: object
+      required: [api_key]
+      properties:
+        api_key: { type: string, writeOnly: true, minLength: 1, maxLength: 128, description: "Etherscan V2 API key. It is stored server-side and never returned." }
+    EtherscanConfig:
+      type: object
+      required: [api_key_configured, polling_interval_seconds]
+      properties:
+        api_key_configured: { type: boolean }
+        polling_interval_seconds: { type: integer, minimum: 1 }
+        last_attempt_at: { type: [string, 'null'], format: date-time }
+        last_success_at: { type: [string, 'null'], format: date-time }
+        last_error: { type: [string, 'null'] }
     CustodyAssetBalance:
       type: object
       required: [symbol, amount, error]
