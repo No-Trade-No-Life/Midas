@@ -118,10 +118,8 @@ function AppRoot() {
   return <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
     <QueryClientProvider client={client}>
       <AuthMiniProvider authMiniBaseUrl={config.auth_mini_base_url} audiences={config.audiences} autoRedirectToLogin>
-        <LinkitProvider linkitBaseUrl={config.linkit_base_url}>
-          <HashRouter><App /></HashRouter>
-          <GlobalToaster />
-        </LinkitProvider>
+        <HashRouter><App linkitBaseUrl={config.linkit_base_url} /></HashRouter>
+        <GlobalToaster />
       </AuthMiniProvider>
     </QueryClientProvider>
   </ThemeProvider>
@@ -131,7 +129,7 @@ function GlobalToaster() {
   return createPortal(<Toaster position="top-center" closeButton />, document.body)
 }
 
-function App() {
+function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
   const [language, setLanguage] = useState<Language>(() => window.localStorage.getItem("midas-language") === "zh" ? "zh" : "en")
   const [navigationOpen, setNavigationOpen] = useState(false)
   const t = (key: keyof typeof messages.en) => messages[language][key]
@@ -143,7 +141,7 @@ function App() {
 
   useEffect(() => { window.localStorage.setItem("midas-language", language) }, [language])
 
-  return <div className="min-h-dvh bg-background">
+  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><div className="min-h-dvh bg-background">
     <header className="sticky top-0 border-b bg-background">
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button><Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><LandmarkIcon aria-hidden="true" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
@@ -167,7 +165,7 @@ function App() {
       </Routes>
     </main>
     {auth.isAuthenticated && <NavigationDrawer currentPath={location.pathname} t={t} root={root} open={navigationOpen} setOpen={setNavigationOpen} />}
-  </div>
+  </div></LinkitProvider>
 }
 
 function Dashboard({ t, language }: { t: Translate; language: Language }) {
@@ -368,12 +366,12 @@ function AdminBalancesPage({ t, language }: { t: Translate; language: Language }
   return <section className="flex flex-col gap-6"><AdminPageHeading t={t} title={t("userBalancesTitle")} body={t("userBalancesBody")} /><Card><CardContent className="pt-6"><dl className="grid gap-5 sm:grid-cols-3"><div className="flex flex-col gap-1"><dt className="text-sm text-muted-foreground">{t("totalHeld")}</dt><dd className="text-2xl font-semibold tabular-nums">${formatUsd(data.summary.total_available_usd)}</dd></div><div className="flex flex-col gap-1"><dt className="text-sm text-muted-foreground">{t("fundedAccounts")}</dt><dd className="text-2xl font-semibold tabular-nums">{data.summary.funded_user_count}</dd></div><div className="flex flex-col gap-1"><dt className="text-sm text-muted-foreground">{t("allAccounts")}</dt><dd className="text-2xl font-semibold tabular-nums">{data.summary.user_count}</dd></div></dl></CardContent></Card><Card><CardHeader><CardTitle>{t("userBalances")}</CardTitle><CardDescription>{t("userBalancesBody")}</CardDescription></CardHeader><CardContent>{data.users.length ? <UserBalanceTable t={t} language={language} users={data.users} /> : <Empty><EmptyHeader><EmptyMedia variant="icon"><UsersRoundIcon /></EmptyMedia><EmptyTitle>{t("noUsers")}</EmptyTitle><EmptyDescription>{t("userBalancesBody")}</EmptyDescription></EmptyHeader></Empty>}</CardContent></Card></section>
 }
 
-function UserBalanceTable({ t, language, users }: { t: Translate; language: Language; users: AdminUserBalance[] }) {
-  return <><div className="flex flex-col sm:hidden">{users.map((user, index) => <div key={user.user_id}><div className="flex items-start justify-between gap-3 py-3"><div className="min-w-0"><span className="text-sm text-muted-foreground">{t("user")}</span><UserIdentity userId={user.user_id} language={language} /><span className="text-muted-foreground text-xs">{formatTime(user.created_at)}</span></div><span className="font-medium tabular-nums">${formatUsd(user.available_usd)}</span></div>{index < users.length - 1 ? <Separator /> : null}</div>)}</div><div className="hidden sm:block"><Table><TableHeader><TableRow><TableHead>{t("user")}</TableHead><TableHead>{t("time")}</TableHead><TableHead className="text-right">{t("balance")}</TableHead></TableRow></TableHeader><TableBody>{users.map((user) => <TableRow key={user.user_id}><TableCell><UserIdentity userId={user.user_id} language={language} compact /></TableCell><TableCell className="text-muted-foreground">{formatTime(user.created_at)}</TableCell><TableCell className="text-right font-medium tabular-nums">${formatUsd(user.available_usd)}</TableCell></TableRow>)}</TableBody></Table></div></>
+function UserBalanceTable({ t, users }: { t: Translate; language?: Language; users: AdminUserBalance[] }) {
+  return <><div className="flex flex-col sm:hidden">{users.map((user, index) => <div key={user.user_id}><div className="flex items-start justify-between gap-3 py-3"><div className="min-w-0"><span className="text-sm text-muted-foreground">{t("user")}</span><UserIdentity userId={user.user_id} /><span className="text-muted-foreground text-xs">{formatTime(user.created_at)}</span></div><span className="font-medium tabular-nums">${formatUsd(user.available_usd)}</span></div>{index < users.length - 1 ? <Separator /> : null}</div>)}</div><div className="hidden sm:block"><Table><TableHeader><TableRow><TableHead>{t("user")}</TableHead><TableHead>{t("time")}</TableHead><TableHead className="text-right">{t("balance")}</TableHead></TableRow></TableHeader><TableBody>{users.map((user) => <TableRow key={user.user_id}><TableCell><UserIdentity compact userId={user.user_id} /></TableCell><TableCell className="text-muted-foreground">{formatTime(user.created_at)}</TableCell><TableCell className="text-right font-medium tabular-nums">${formatUsd(user.available_usd)}</TableCell></TableRow>)}</TableBody></Table></div></>
 }
 
-function UserIdentity({ userId, language, compact = false }: { userId: string; language: Language; compact?: boolean }) {
-  return <LinkitUserInfo userId={userId} lang={language === "zh" ? "zh-CN" : "en"} compact={compact} className="min-w-0" />
+function UserIdentity({ userId, compact = false }: { userId: string; language?: Language; compact?: boolean }) {
+  return <span className="min-w-0"><LinkitUserInfo compact={compact} userId={userId} /></span>
 }
 
 function AdminLedgerPage({ t, language }: { t: Translate; language: Language }) {
