@@ -24,7 +24,6 @@ use ethers::{
     utils::keccak256,
 };
 use rand::thread_rng;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
 use tokio::{
@@ -48,7 +47,6 @@ const AUTH_MINI_AUDIENCE: &str = "midas.ntnl.io";
 const ROOT_USER_ID_KEY: &str = "root_user_id";
 const CUSTODY_WALLET_ADDRESS_KEY: &str = "evm_custody_wallet_address";
 const CUSTODY_WALLET_PRIVATE_KEY_KEY: &str = "evm_custody_wallet_private_key";
-const ETHERSCAN_API_KEY_KEY: &str = "etherscan_api_key";
 const LEGACY_GAS_ACCOUNT_PRIVATE_KEY_KEY: &str = "evm_gas_account_private_key";
 const LEGACY_COLLECTION_WALLET_PRIVATE_KEY_KEY: &str = "evm_collection_wallet_private_key";
 const DEFAULT_GAS_FUNDING_WEI: &str = "1000000000000000";
@@ -56,10 +54,9 @@ const DEFAULT_GAS_FUNDING_WEI: &str = "1000000000000000";
 // A user deposit key is EVM-compatible, so new rows use this internal sentinel
 // and no API or query exposes it as a per-chain choice.
 const EVM_ADDRESS_SENTINEL_CHAIN_ID: i64 = 1;
-const ETHERSCAN_PAGE_SIZE: usize = 100;
-const ETHERSCAN_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const ETHERSCAN_API_URL: &str = "https://api.etherscan.io/v2/api";
+const DEPOSIT_DISCOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RPC_DISCOVERY_BOOTSTRAP_BLOCKS: i64 = 1_024;
+const RPC_DISCOVERY_BLOCK_RANGE: i64 = 1_024;
 const BSC_DISCOVERY_RPC_URL: &str = "https://bsc-rpc.publicnode.com";
 
 #[derive(Clone, Copy)]
@@ -202,7 +199,6 @@ const BUILTIN_ASSETS: [BuiltinAsset; 12] = [
 struct AppState {
     db: SqlitePool,
     verifier: AuthMiniVerifier,
-    etherscan_client: Client,
     write_lock: Arc<Mutex<()>>,
     sweep_lock: Arc<Mutex<()>>,
     withdrawal_lock: Arc<Mutex<()>>,
@@ -341,17 +337,11 @@ struct EvmConfigInput {
 }
 
 #[derive(Serialize)]
-struct EtherscanConfig {
-    api_key_configured: bool,
+struct DepositDiscoveryStatus {
     polling_interval_seconds: u64,
     last_attempt_at: Option<String>,
     last_success_at: Option<String>,
     last_error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct EtherscanConfigInput {
-    api_key: String,
 }
 
 #[derive(Serialize)]
@@ -385,6 +375,12 @@ struct WalletAddress {
 #[derive(Deserialize)]
 struct DepositRequest {
     asset_id: String,
+    transaction_hash: String,
+}
+
+#[derive(Deserialize)]
+struct DepositClaimRequest {
+    chain_id: i64,
     transaction_hash: String,
 }
 
@@ -554,31 +550,17 @@ struct DiscoveryTarget {
     address: String,
     chain_id: i64,
     next_block_number: i64,
-    next_page: i64,
     last_seen_block_number: i64,
 }
 
 struct DiscoveryCursorPosition {
     next_block_number: i64,
-    next_page: i64,
     last_seen_block_number: i64,
 }
 
-#[derive(Deserialize)]
-struct EtherscanEnvelope {
-    status: String,
-    message: String,
-    result: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-struct EtherscanTokenTransfer {
-    #[serde(rename = "blockNumber")]
-    block_number: String,
+struct DiscoveredTransfer {
     hash: String,
-    #[serde(rename = "contractAddress")]
     contract_address: String,
-    to: String,
 }
 
 struct VerifiedDeposit {
@@ -666,15 +648,9 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("initialize Auth Mini verifier")?;
-    let etherscan_client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent("Midas deposit discovery")
-        .build()
-        .context("initialize Etherscan client")?;
     let state = AppState {
         db,
         verifier,
-        etherscan_client,
         write_lock: Arc::new(Mutex::new(())),
         sweep_lock: Arc::new(Mutex::new(())),
         withdrawal_lock: Arc::new(Mutex::new(())),
@@ -703,6 +679,7 @@ fn app(state: AppState) -> Router {
         .route("/ledger/me", get(my_ledger))
         .route("/wallet-addresses/me", get(my_wallet_addresses))
         .route("/deposits/confirm", post(confirm_deposit))
+        .route("/deposits/claim", post(claim_deposit))
         .route("/transfers", post(create_transfer))
         .route(
             "/address-book/me",
@@ -723,10 +700,8 @@ fn app(state: AppState) -> Router {
             get(read_evm_config).put(write_evm_config),
         )
         .route(
-            "/admin/etherscan-config",
-            get(read_etherscan_config)
-                .put(write_etherscan_config)
-                .delete(clear_etherscan_config),
+            "/admin/deposit-discovery",
+            get(read_deposit_discovery_status),
         )
         .route("/admin/custody-balances", get(read_custody_balances))
         .route("/admin/balances", get(list_admin_balances))
@@ -977,6 +952,38 @@ async fn confirm_deposit(
     Ok(Json(read_deposit_response(&state.db, &deposit_id).await?))
 }
 
+async fn claim_deposit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<DepositClaimRequest>,
+) -> Result<Json<DepositResponse>, ApiError> {
+    let user_id = require_initialized_user(&state, &headers).await?;
+    let idempotency_key = idempotency_key(&headers)?;
+    let targets = load_deposit_targets_for_chain(&state.db, &user_id, input.chain_id).await?;
+    let (target, verified) = verify_deposit_claim(targets, &input.transaction_hash).await?;
+
+    let deposit_id = {
+        let _write = state.write_lock.lock().await;
+        if let Some(existing) =
+            operation_resource(&state.db, &user_id, "deposit", &idempotency_key).await?
+        {
+            return Ok(Json(read_deposit_response(&state.db, &existing).await?));
+        }
+        insert_verified_deposit(
+            &state.db,
+            &user_id,
+            &target,
+            &verified,
+            &idempotency_key,
+            "Customer-claimed EVM deposit",
+        )
+        .await?
+        .ok_or_else(|| ApiError::conflict("this transaction has already been credited"))?
+    };
+    start_deposit_sweep(&state, &deposit_id).await?;
+    Ok(Json(read_deposit_response(&state.db, &deposit_id).await?))
+}
+
 async fn insert_verified_deposit(
     db: &SqlitePool,
     user_id: &str,
@@ -985,15 +992,12 @@ async fn insert_verified_deposit(
     idempotency_key: &str,
     note: &str,
 ) -> Result<Option<String>, ApiError> {
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM deposits WHERE asset_id=?1 AND transaction_hash=?2 AND log_index=?3",
-    )
-    .bind(&target.asset_id)
-    .bind(&verified.transaction_hash)
-    .bind(verified.log_index)
-    .fetch_optional(db)
-    .await
-    .map_err(db_error)?;
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM deposits WHERE transaction_hash=?1")
+            .bind(&verified.transaction_hash)
+            .fetch_optional(db)
+            .await
+            .map_err(db_error)?;
     if existing.is_some() {
         return Ok(None);
     }
@@ -1080,42 +1084,23 @@ fn spawn_deposit_sweep(state: AppState, deposit_id: String) {
 
 fn start_deposit_discovery(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = time::interval(ETHERSCAN_POLL_INTERVAL);
+        let mut interval = time::interval(DEPOSIT_DISCOVERY_POLL_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             if let Err(error) = discover_next_deposit(&state).await {
-                eprintln!(
-                    "Etherscan deposit discovery cycle failed: {}",
-                    error.message
-                );
+                eprintln!("RPC deposit discovery cycle failed: {}", error.message);
             }
         }
     });
 }
 
 async fn discover_next_deposit(state: &AppState) -> Result<(), ApiError> {
-    let Some(api_key) = meta(&state.db, ETHERSCAN_API_KEY_KEY)
-        .await
-        .map_err(db_error)?
-    else {
-        return Ok(());
-    };
     let Some(target) = next_discovery_target(&state.db).await? else {
         return Ok(());
     };
-    let outcome = async {
-        let (transfers, position) = match etherscan_token_transfers(state, &target, &api_key).await
-        {
-            Ok(transfers) => {
-                let position = discovery_cursor_after(&target, &transfers)?;
-                (transfers, position)
-            }
-            Err(error) if error.status == StatusCode::NOT_IMPLEMENTED => {
-                rpc_discovery_transfers(&target).await?
-            }
-            Err(error) => return Err(error),
-        };
+    let outcome: Result<DiscoveryCursorPosition, ApiError> = async {
+        let (transfers, position) = rpc_discovery_transfers(&target).await?;
         process_discovered_transfers(state, &target, &transfers).await?;
         Ok(position)
     }
@@ -1130,7 +1115,7 @@ async fn discover_next_deposit(state: &AppState) -> Result<(), ApiError> {
 }
 
 async fn next_discovery_target(db: &SqlitePool) -> Result<Option<DiscoveryTarget>, ApiError> {
-    let row = sqlx::query("SELECT w.id,w.user_id,w.address,n.chain_id,COALESCE(c.next_block_number,0),COALESCE(c.next_page,1),COALESCE(c.last_seen_block_number,0) FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id CROSS JOIN evm_networks n LEFT JOIN deposit_discovery_cursors c ON c.wallet_address_id=w.id AND c.chain_id=n.chain_id WHERE n.enabled=1 ORDER BY CASE WHEN c.last_attempt_at IS NULL THEN 0 ELSE 1 END,c.last_attempt_at,w.created_at,w.id,n.chain_id LIMIT 1")
+    let row = sqlx::query("SELECT w.id,w.user_id,w.address,n.chain_id,COALESCE(c.next_block_number,0),COALESCE(c.last_seen_block_number,0) FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id CROSS JOIN evm_networks n LEFT JOIN deposit_discovery_cursors c ON c.wallet_address_id=w.id AND c.chain_id=n.chain_id WHERE n.enabled=1 ORDER BY CASE WHEN c.last_attempt_at IS NULL THEN 0 ELSE 1 END,c.last_attempt_at,w.created_at,w.id,n.chain_id LIMIT 1")
         .fetch_optional(db)
         .await
         .map_err(db_error)?;
@@ -1140,94 +1125,13 @@ async fn next_discovery_target(db: &SqlitePool) -> Result<Option<DiscoveryTarget
         address: row.get(2),
         chain_id: row.get(3),
         next_block_number: row.get(4),
-        next_page: row.get(5),
-        last_seen_block_number: row.get(6),
+        last_seen_block_number: row.get(5),
     }))
-}
-
-async fn etherscan_token_transfers(
-    state: &AppState,
-    target: &DiscoveryTarget,
-    api_key: &str,
-) -> Result<Vec<EtherscanTokenTransfer>, ApiError> {
-    let response = state
-        .etherscan_client
-        .get(ETHERSCAN_API_URL)
-        .query(&[
-            ("chainid", target.chain_id.to_string()),
-            ("module", "account".to_string()),
-            ("action", "tokentx".to_string()),
-            ("address", target.address.clone()),
-            ("startblock", target.next_block_number.to_string()),
-            ("endblock", "9999999999".to_string()),
-            ("page", target.next_page.to_string()),
-            ("offset", ETHERSCAN_PAGE_SIZE.to_string()),
-            ("sort", "asc".to_string()),
-            ("apikey", api_key.to_string()),
-        ])
-        .send()
-        .await
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                "Etherscan discovery request failed",
-            )
-        })?;
-    if !response.status().is_success() {
-        return Err(ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            format!(
-                "Etherscan discovery returned HTTP {}",
-                response.status().as_u16()
-            ),
-        ));
-    }
-    let envelope: EtherscanEnvelope = response.json().await.map_err(|_| {
-        ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            "Etherscan discovery returned an invalid response",
-        )
-    })?;
-    parse_etherscan_token_transfers(envelope)
-}
-
-fn parse_etherscan_token_transfers(
-    envelope: EtherscanEnvelope,
-) -> Result<Vec<EtherscanTokenTransfer>, ApiError> {
-    if envelope.status == "1" {
-        return serde_json::from_value(envelope.result).map_err(|_| {
-            ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                "Etherscan discovery returned an invalid transaction list",
-            )
-        });
-    }
-    if envelope
-        .message
-        .eq_ignore_ascii_case("No transactions found")
-    {
-        return Ok(Vec::new());
-    }
-    if envelope
-        .result
-        .as_str()
-        .is_some_and(|result| result.contains("Free API access is not supported for this chain"))
-    {
-        return Err(ApiError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "Etherscan free plan does not support this chain",
-        ));
-    }
-    let detail = envelope.result.as_str().unwrap_or(&envelope.message);
-    Err(ApiError::new(
-        StatusCode::BAD_GATEWAY,
-        format!("Etherscan discovery failed: {detail}"),
-    ))
 }
 
 async fn rpc_discovery_transfers(
     target: &DiscoveryTarget,
-) -> Result<(Vec<EtherscanTokenTransfer>, DiscoveryCursorPosition), ApiError> {
+) -> Result<(Vec<DiscoveredTransfer>, DiscoveryCursorPosition), ApiError> {
     let network =
         builtin_network(target.chain_id).expect("discovery target uses a built-in EVM network");
     let provider = rpc_provider(discovery_rpc_url(network))?;
@@ -1236,21 +1140,17 @@ async fn rpc_discovery_transfers(
         .await
         .map_err(chain_error)?
         .as_u64() as i64;
-    let start_block = if target.next_block_number == 0 {
-        latest_block.saturating_sub(RPC_DISCOVERY_BOOTSTRAP_BLOCKS)
-    } else {
-        target.next_block_number
-    };
-    if start_block > latest_block {
+    let Some((start_block, end_block)) =
+        rpc_discovery_range(target.next_block_number, latest_block)
+    else {
         return Ok((
             Vec::new(),
             DiscoveryCursorPosition {
                 next_block_number: target.next_block_number,
-                next_page: 1,
                 last_seen_block_number: target.last_seen_block_number,
             },
         ));
-    }
+    };
     let contracts: Vec<&str> = BUILTIN_ASSETS
         .iter()
         .filter(|asset| asset.chain_id == target.chain_id)
@@ -1261,7 +1161,7 @@ async fn rpc_discovery_transfers(
     recipient_topic[12..].copy_from_slice(recipient.as_bytes());
     let filter = serde_json::json!({
         "fromBlock": format!("0x{start_block:x}"),
-        "toBlock": format!("0x{latest_block:x}"),
+        "toBlock": format!("0x{end_block:x}"),
         "address": contracts,
         "topics": [
             format!("{:#x}", H256::from(keccak256("Transfer(address,address,uint256)"))),
@@ -1276,21 +1176,33 @@ async fn rpc_discovery_transfers(
     let transfers = logs
         .into_iter()
         .filter_map(|log| {
-            Some(EtherscanTokenTransfer {
-                block_number: log.block_number?.as_u64().to_string(),
+            Some(DiscoveredTransfer {
                 hash: format!("{:#x}", log.transaction_hash?),
                 contract_address: format!("{:#x}", log.address),
-                to: target.address.clone(),
             })
         })
         .collect();
     Ok((
         transfers,
         DiscoveryCursorPosition {
-            next_block_number: latest_block.saturating_add(1),
-            next_page: 1,
-            last_seen_block_number: latest_block,
+            next_block_number: end_block.saturating_add(1),
+            last_seen_block_number: end_block,
         },
+    ))
+}
+
+fn rpc_discovery_range(next_block_number: i64, latest_block: i64) -> Option<(i64, i64)> {
+    let start_block = if next_block_number == 0 {
+        latest_block.saturating_sub(RPC_DISCOVERY_BOOTSTRAP_BLOCKS - 1)
+    } else {
+        next_block_number
+    };
+    if start_block > latest_block {
+        return None;
+    }
+    Some((
+        start_block,
+        latest_block.min(start_block.saturating_add(RPC_DISCOVERY_BLOCK_RANGE - 1)),
     ))
 }
 
@@ -1305,13 +1217,10 @@ fn discovery_rpc_url(network: BuiltinEvmNetwork) -> &'static str {
 async fn process_discovered_transfers(
     state: &AppState,
     target: &DiscoveryTarget,
-    transfers: &[EtherscanTokenTransfer],
+    transfers: &[DiscoveredTransfer],
 ) -> Result<(), ApiError> {
     let mut seen = HashSet::new();
     for transfer in transfers {
-        if !transfer.to.eq_ignore_ascii_case(&target.address) {
-            continue;
-        }
         let Some(asset) = BUILTIN_ASSETS.iter().copied().find(|asset| {
             asset.chain_id == target.chain_id
                 && asset
@@ -1320,24 +1229,14 @@ async fn process_discovered_transfers(
         }) else {
             continue;
         };
-        if !seen.insert((asset.id, transfer.hash.to_ascii_lowercase())) {
+        if !seen.insert(transfer.hash.to_ascii_lowercase()) {
             continue;
         }
-        let deposit_target = DepositTarget {
-            wallet_id: target.wallet_id.clone(),
-            address: target.address.clone(),
-            asset_id: asset.id.to_string(),
-            symbol: asset.symbol.to_string(),
-            contract_address: asset.contract_address.to_string(),
-            rpc_url: builtin_network(target.chain_id)
-                .expect("discovery target uses a built-in EVM network")
-                .rpc_url
-                .to_string(),
-            token_decimals: asset.token_decimals,
-        };
+        let deposit_target =
+            deposit_target(target.wallet_id.clone(), target.address.clone(), asset);
         let verified = verify_deposit_receipt(&deposit_target, &transfer.hash).await?;
         let idempotency_key = format!(
-            "etherscan:{}:{}:{}",
+            "rpc:{}:{}:{}",
             deposit_target.asset_id, verified.transaction_hash, verified.log_index
         );
         let deposit_id = {
@@ -1359,45 +1258,6 @@ async fn process_discovered_transfers(
     Ok(())
 }
 
-fn discovery_cursor_after(
-    target: &DiscoveryTarget,
-    transfers: &[EtherscanTokenTransfer],
-) -> Result<DiscoveryCursorPosition, ApiError> {
-    let last_seen_block_number = transfers
-        .last()
-        .map(|transfer| {
-            transfer.block_number.parse::<i64>().map_err(|_| {
-                ApiError::new(
-                    StatusCode::BAD_GATEWAY,
-                    "Etherscan discovery returned an invalid block number",
-                )
-            })
-        })
-        .transpose()?
-        .unwrap_or(target.last_seen_block_number);
-    if transfers.len() == ETHERSCAN_PAGE_SIZE {
-        return Ok(DiscoveryCursorPosition {
-            next_block_number: target.next_block_number,
-            next_page: target.next_page.checked_add(1).ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::BAD_GATEWAY,
-                    "Etherscan discovery page number is invalid",
-                )
-            })?,
-            last_seen_block_number,
-        });
-    }
-    Ok(DiscoveryCursorPosition {
-        next_block_number: if last_seen_block_number > 0 {
-            last_seen_block_number
-        } else {
-            target.next_block_number
-        },
-        next_page: 1,
-        last_seen_block_number,
-    })
-}
-
 async fn record_discovery_success(
     state: &AppState,
     target: &DiscoveryTarget,
@@ -1405,11 +1265,10 @@ async fn record_discovery_success(
 ) -> Result<(), ApiError> {
     let _write = state.write_lock.lock().await;
     let now = Utc::now().to_rfc3339();
-    sqlx::query("INSERT INTO deposit_discovery_cursors(wallet_address_id,chain_id,next_block_number,next_page,last_seen_block_number,last_attempt_at,last_success_at,last_error,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6,NULL,?6) ON CONFLICT(wallet_address_id,chain_id) DO UPDATE SET next_block_number=excluded.next_block_number,next_page=excluded.next_page,last_seen_block_number=excluded.last_seen_block_number,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error=NULL,updated_at=excluded.updated_at")
+    sqlx::query("INSERT INTO deposit_discovery_cursors(wallet_address_id,chain_id,next_block_number,last_seen_block_number,last_attempt_at,last_success_at,last_error,updated_at) VALUES(?1,?2,?3,?4,?5,?5,NULL,?5) ON CONFLICT(wallet_address_id,chain_id) DO UPDATE SET next_block_number=excluded.next_block_number,last_seen_block_number=excluded.last_seen_block_number,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error=NULL,updated_at=excluded.updated_at")
         .bind(&target.wallet_id)
         .bind(target.chain_id)
         .bind(position.next_block_number)
-        .bind(position.next_page)
         .bind(position.last_seen_block_number)
         .bind(&now)
         .execute(&state.db)
@@ -1426,11 +1285,10 @@ async fn record_discovery_failure(
     let _write = state.write_lock.lock().await;
     let now = Utc::now().to_rfc3339();
     let error_message: String = error_message.chars().take(500).collect();
-    sqlx::query("INSERT INTO deposit_discovery_cursors(wallet_address_id,chain_id,next_block_number,next_page,last_seen_block_number,last_attempt_at,last_success_at,last_error,updated_at) VALUES(?1,?2,?3,?4,?5,?6,NULL,?7,?6) ON CONFLICT(wallet_address_id,chain_id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,last_error=excluded.last_error,updated_at=excluded.updated_at")
+    sqlx::query("INSERT INTO deposit_discovery_cursors(wallet_address_id,chain_id,next_block_number,last_seen_block_number,last_attempt_at,last_success_at,last_error,updated_at) VALUES(?1,?2,?3,?4,?5,NULL,?6,?5) ON CONFLICT(wallet_address_id,chain_id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,last_error=excluded.last_error,updated_at=excluded.updated_at")
         .bind(&target.wallet_id)
         .bind(target.chain_id)
         .bind(target.next_block_number)
-        .bind(target.next_page)
         .bind(target.last_seen_block_number)
         .bind(&now)
         .bind(error_message)
@@ -1952,72 +1810,27 @@ async fn write_evm_config(
     Ok(Json(load_evm_config(&state.db).await?))
 }
 
-async fn read_etherscan_config(
+async fn read_deposit_discovery_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<EtherscanConfig>, ApiError> {
+) -> Result<Json<DepositDiscoveryStatus>, ApiError> {
     require_root(&state, &headers).await?;
-    Ok(Json(load_etherscan_config(&state.db).await?))
+    Ok(Json(load_deposit_discovery_status(&state.db).await?))
 }
 
-async fn write_etherscan_config(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<EtherscanConfigInput>,
-) -> Result<Json<EtherscanConfig>, ApiError> {
-    require_root(&state, &headers).await?;
-    let api_key = etherscan_api_key(&input.api_key)?;
-    let _write = state.write_lock.lock().await;
-    set_meta(&state.db, ETHERSCAN_API_KEY_KEY, &api_key)
-        .await
-        .map_err(db_error)?;
-    Ok(Json(load_etherscan_config(&state.db).await?))
-}
-
-async fn clear_etherscan_config(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
-    require_root(&state, &headers).await?;
-    let _write = state.write_lock.lock().await;
-    sqlx::query("DELETE FROM app_meta WHERE key=?1")
-        .bind(ETHERSCAN_API_KEY_KEY)
-        .execute(&state.db)
-        .await
-        .map_err(db_error)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn load_etherscan_config(db: &SqlitePool) -> Result<EtherscanConfig, ApiError> {
-    let api_key_configured = meta(db, ETHERSCAN_API_KEY_KEY)
-        .await
-        .map_err(db_error)?
-        .is_some();
+async fn load_deposit_discovery_status(
+    db: &SqlitePool,
+) -> Result<DepositDiscoveryStatus, ApiError> {
     let row = sqlx::query("SELECT last_attempt_at,last_success_at,last_error FROM deposit_discovery_cursors WHERE last_attempt_at IS NOT NULL ORDER BY last_attempt_at DESC,wallet_address_id,chain_id LIMIT 1")
         .fetch_optional(db)
         .await
         .map_err(db_error)?;
-    Ok(EtherscanConfig {
-        api_key_configured,
-        polling_interval_seconds: ETHERSCAN_POLL_INTERVAL.as_secs(),
+    Ok(DepositDiscoveryStatus {
+        polling_interval_seconds: DEPOSIT_DISCOVERY_POLL_INTERVAL.as_secs(),
         last_attempt_at: row.as_ref().map(|row| row.get(0)).unwrap_or(None),
         last_success_at: row.as_ref().map(|row| row.get(1)).unwrap_or(None),
         last_error: row.as_ref().map(|row| row.get(2)).unwrap_or(None),
     })
-}
-
-fn etherscan_api_key(value: &str) -> Result<String, ApiError> {
-    let key = value.trim();
-    if !(1..=128).contains(&key.len())
-        || !key
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
-    {
-        return Err(ApiError::invalid(
-            "Etherscan API key must contain 1 to 128 letters or digits",
-        ));
-    }
-    Ok(key.to_string())
 }
 
 async fn read_custody_balances(
@@ -2781,15 +2594,43 @@ async fn load_deposit_target(
 ) -> Result<DepositTarget, ApiError> {
     let asset = builtin_asset(&input.asset_id)
         .ok_or_else(|| ApiError::invalid("the deposit asset is not supported"))?;
+    let (wallet_id, address) = load_user_deposit_wallet(db, user_id).await?;
+    Ok(deposit_target(wallet_id, address, asset))
+}
+
+async fn load_deposit_targets_for_chain(
+    db: &SqlitePool,
+    user_id: &str,
+    chain_id: i64,
+) -> Result<Vec<DepositTarget>, ApiError> {
+    if builtin_network(chain_id).is_none() {
+        return Err(ApiError::invalid("the deposit network is not supported"));
+    }
+    let (wallet_id, address) = load_user_deposit_wallet(db, user_id).await?;
+    Ok(BUILTIN_ASSETS
+        .iter()
+        .filter(|asset| asset.chain_id == chain_id)
+        .map(|asset| deposit_target(wallet_id.clone(), address.clone(), *asset))
+        .collect())
+}
+
+async fn load_user_deposit_wallet(
+    db: &SqlitePool,
+    user_id: &str,
+) -> Result<(String, String), ApiError> {
     let row = sqlx::query("SELECT w.id,w.address FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id WHERE w.user_id=?1 ORDER BY w.created_at,w.id LIMIT 1")
         .bind(user_id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
         .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "deposit wallet was not initialized"))?;
-    Ok(DepositTarget {
-        wallet_id: row.get(0),
-        address: row.get(1),
+    Ok((row.get(0), row.get(1)))
+}
+
+fn deposit_target(wallet_id: String, address: String, asset: BuiltinAsset) -> DepositTarget {
+    DepositTarget {
+        wallet_id,
+        address,
         asset_id: asset.id.to_string(),
         symbol: asset.symbol.to_string(),
         contract_address: asset.contract_address.to_string(),
@@ -2798,16 +2639,44 @@ async fn load_deposit_target(
             .rpc_url
             .to_string(),
         token_decimals: asset.token_decimals,
-    })
+    }
 }
 
 async fn verify_deposit_receipt(
     target: &DepositTarget,
     value: &str,
 ) -> Result<VerifiedDeposit, ApiError> {
+    let (transaction_hash, receipt) = confirmed_deposit_receipt(&target.rpc_url, value).await?;
+    verified_deposit_transfer(target, transaction_hash, &receipt.logs)
+}
+
+async fn verify_deposit_claim(
+    targets: Vec<DepositTarget>,
+    value: &str,
+) -> Result<(DepositTarget, VerifiedDeposit), ApiError> {
+    let rpc_url = targets
+        .first()
+        .expect("each supported network has USDC and USDT")
+        .rpc_url
+        .clone();
+    let (transaction_hash, receipt) = confirmed_deposit_receipt(&rpc_url, value).await?;
+    for target in targets {
+        if let Ok(verified) = verified_deposit_transfer(&target, transaction_hash, &receipt.logs) {
+            return Ok((target, verified));
+        }
+    }
+    Err(ApiError::invalid(
+        "the transaction does not contain a supported USDC or USDT Transfer to this deposit address",
+    ))
+}
+
+async fn confirmed_deposit_receipt(
+    rpc_url: &str,
+    value: &str,
+) -> Result<(H256, TransactionReceipt), ApiError> {
     let transaction_hash = H256::from_str(value)
         .map_err(|_| ApiError::invalid("transaction_hash must be a 32-byte EVM hash"))?;
-    let receipt = rpc_provider(&target.rpc_url)?
+    let receipt = rpc_provider(rpc_url)?
         .get_transaction_receipt(transaction_hash)
         .await
         .map_err(chain_error)?
@@ -2815,7 +2684,7 @@ async fn verify_deposit_receipt(
     if receipt.status.map(|status| status.as_u64()) != Some(1) {
         return Err(ApiError::invalid("the deposit transaction reverted"));
     }
-    verified_deposit_transfer(target, transaction_hash, &receipt.logs)
+    Ok((transaction_hash, receipt))
 }
 
 fn verified_deposit_transfer(
@@ -3413,6 +3282,9 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             .execute(db)
             .await?;
     }
+    sqlx::query("DELETE FROM app_meta WHERE key='etherscan_api_key'")
+        .execute(db)
+        .await?;
     seed_builtin_evm(db).await?;
     migrate_legacy_custody_wallet(db).await?;
     Ok(())
@@ -3517,6 +3389,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cursor_table, "deposit_discovery_cursors");
+        let deposit_transaction_index: String = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='deposits_transaction_hash_unique_idx'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            deposit_transaction_index,
+            "deposits_transaction_hash_unique_idx"
+        );
         let address_book_table: String = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='address_book_entries'",
         )
@@ -3558,6 +3440,11 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(arbitrum_rpc_url, "https://arb1.arbitrum.io/rpc");
+        set_meta(&db, "etherscan_api_key", "obsolete-key")
+            .await
+            .unwrap();
+        migrate(&db).await.unwrap();
+        assert!(meta(&db, "etherscan_api_key").await.unwrap().is_none());
         let _ = std::fs::remove_file(path);
     }
 
@@ -3568,35 +3455,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_etherscan_transaction_lists_without_exposing_the_api_key() {
-        let transfers = parse_etherscan_token_transfers(
-            serde_json::from_str(
-                r#"{"status":"1","message":"OK","result":[{"blockNumber":"123","hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","contractAddress":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","to":"0x0000000000000000000000000000000000000001"}]}"#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(transfers.len(), 1);
-        assert_eq!(transfers[0].block_number, "123");
-        assert!(
-            parse_etherscan_token_transfers(
-                serde_json::from_str(
-                    r#"{"status":"0","message":"No transactions found","result":"[]"}"#
-                )
-                .unwrap(),
-            )
-            .unwrap()
-            .is_empty()
-        );
-        assert!(etherscan_api_key("invalid key").is_err());
-        assert_eq!(etherscan_api_key("abc123").unwrap(), "abc123");
-        let restriction = match parse_etherscan_token_transfers(
-            serde_json::from_str(r#"{"status":"0","message":"NOTOK","result":"Free API access is not supported for this chain."}"#).unwrap(),
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("Free-plan restriction must select the RPC fallback"),
-        };
-        assert_eq!(restriction.status, StatusCode::NOT_IMPLEMENTED);
+    fn bounds_rpc_discovery_and_resumes_from_the_saved_cursor() {
+        assert_eq!(rpc_discovery_range(0, 5_000), Some((3_977, 5_000)));
+        assert_eq!(rpc_discovery_range(101, 5_000), Some((101, 1_124)));
+        assert_eq!(rpc_discovery_range(5_001, 5_000), None);
         assert_eq!(
             discovery_rpc_url(builtin_network(56).unwrap()),
             BSC_DISCOVERY_RPC_URL
@@ -3605,39 +3467,6 @@ mod tests {
             discovery_rpc_url(builtin_network(8453).unwrap()),
             "https://mainnet.base.org"
         );
-    }
-
-    #[test]
-    fn advances_etherscan_cursor_across_full_pages_without_skipping_the_tail_block() {
-        let target = DiscoveryTarget {
-            wallet_id: "wallet".to_string(),
-            user_id: "user".to_string(),
-            address: "0x0000000000000000000000000000000000000001".to_string(),
-            chain_id: 8453,
-            next_block_number: 100,
-            next_page: 1,
-            last_seen_block_number: 0,
-        };
-        let full_page: Vec<EtherscanTokenTransfer> = (0..ETHERSCAN_PAGE_SIZE)
-            .map(|index| EtherscanTokenTransfer {
-                block_number: "250".to_string(),
-                hash: format!("0x{index:064x}"),
-                contract_address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
-                to: target.address.clone(),
-            })
-            .collect();
-        let next = discovery_cursor_after(&target, &full_page).unwrap();
-        assert_eq!(next.next_block_number, 100);
-        assert_eq!(next.next_page, 2);
-        assert_eq!(next.last_seen_block_number, 250);
-        let tail = DiscoveryTarget {
-            next_page: 2,
-            last_seen_block_number: next.last_seen_block_number,
-            ..target
-        };
-        let complete = discovery_cursor_after(&tail, &[]).unwrap();
-        assert_eq!(complete.next_block_number, 250);
-        assert_eq!(complete.next_page, 1);
     }
 
     #[tokio::test]
@@ -3677,7 +3506,7 @@ mod tests {
             transaction_hash: format!("0x{}", "a".repeat(64)),
             log_index: 4,
         };
-        let idempotency_key = "etherscan:1-USDC:verified-transfer:4";
+        let idempotency_key = "rpc:1-USDC:verified-transfer:4";
         assert!(
             insert_verified_deposit(
                 &db,
@@ -3698,6 +3527,23 @@ mod tests {
                 &target,
                 &verified,
                 idempotency_key,
+                "Automatically discovered EVM deposit",
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let second_event_in_same_transaction = VerifiedDeposit {
+            log_index: 5,
+            ..verified
+        };
+        assert!(
+            insert_verified_deposit(
+                &db,
+                &user_id,
+                &target,
+                &second_event_in_same_transaction,
+                "rpc:1-USDC:verified-transfer:5",
                 "Automatically discovered EVM deposit",
             )
             .await
