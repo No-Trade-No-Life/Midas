@@ -56,8 +56,9 @@ const DEFAULT_GAS_FUNDING_WEI: &str = "1000000000000000";
 const EVM_ADDRESS_SENTINEL_CHAIN_ID: i64 = 1;
 const DEPOSIT_DISCOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RPC_DISCOVERY_BOOTSTRAP_BLOCKS: i64 = 1_024;
-const RPC_DISCOVERY_BLOCK_RANGE: i64 = 1_024;
-const ETHEREUM_DISCOVERY_RPC_URL: &str = "https://eth.drpc.org";
+const RPC_DISCOVERY_BLOCK_RANGE: i64 = 50;
+const RPC_DISCOVERY_CONFIRMATION_BLOCKS: i64 = 2;
+const ETHEREUM_DISCOVERY_RPC_URL: &str = "https://rpc.mevblocker.io";
 const BSC_DISCOVERY_RPC_URL: &str = "https://bsc-rpc.publicnode.com";
 
 #[derive(Clone, Copy)]
@@ -1136,11 +1137,12 @@ async fn rpc_discovery_transfers(
     let network =
         builtin_network(target.chain_id).expect("discovery target uses a built-in EVM network");
     let provider = rpc_provider(discovery_rpc_url(network))?;
-    let latest_block = provider
+    let head_block = provider
         .get_block_number()
         .await
         .map_err(chain_error)?
         .as_u64() as i64;
+    let latest_block = head_block.saturating_sub(RPC_DISCOVERY_CONFIRMATION_BLOCKS);
     let Some((start_block, end_block)) =
         rpc_discovery_range(target.next_block_number, latest_block)
     else {
@@ -3457,8 +3459,8 @@ mod tests {
 
     #[test]
     fn bounds_rpc_discovery_and_resumes_from_the_saved_cursor() {
-        assert_eq!(rpc_discovery_range(0, 5_000), Some((3_977, 5_000)));
-        assert_eq!(rpc_discovery_range(101, 5_000), Some((101, 1_124)));
+        assert_eq!(rpc_discovery_range(0, 5_000), Some((3_977, 4_026)));
+        assert_eq!(rpc_discovery_range(101, 5_000), Some((101, 150)));
         assert_eq!(rpc_discovery_range(5_001, 5_000), None);
         assert_eq!(
             discovery_rpc_url(builtin_network(1).unwrap()),
