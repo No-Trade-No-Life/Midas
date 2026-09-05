@@ -4,7 +4,7 @@ use anyhow::Context;
 use auth_mini_axum::{AuthMiniVerifier, JwksCachePolicy};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -284,6 +284,8 @@ struct LedgerEntry {
     posted_at: Option<String>,
     asset_symbol: Option<String>,
     chain_id: Option<i64>,
+    network_name: Option<String>,
+    transaction_hash: Option<String>,
     external_reference: Option<String>,
     note: Option<String>,
 }
@@ -359,6 +361,72 @@ struct AdminDeposit {
     token_transaction_hash: Option<String>,
     sweep_error_message: Option<String>,
     sweep_updated_at: String,
+}
+
+#[derive(Serialize)]
+struct AdminBalanceSummary {
+    user_count: i64,
+    funded_user_count: i64,
+    total_available_usd_micros: i64,
+    total_available_usd: String,
+}
+
+#[derive(Serialize)]
+struct AdminUserBalance {
+    user_id: String,
+    created_at: String,
+    available_usd_micros: i64,
+    available_usd: String,
+}
+
+#[derive(Serialize)]
+struct AdminBalancesResponse {
+    summary: AdminBalanceSummary,
+    users: Vec<AdminUserBalance>,
+}
+
+#[derive(Deserialize, Default)]
+struct AdminLedgerQuery {
+    kind: Option<String>,
+    status: Option<String>,
+    user_id: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+struct AdminLedgerFilters {
+    kind: Option<String>,
+    status: Option<String>,
+    user_id: Option<String>,
+    limit: i64,
+    offset: i64,
+}
+
+#[derive(Serialize)]
+struct AdminLedgerEntry {
+    id: String,
+    user_id: String,
+    counterparty_user_id: Option<String>,
+    kind: String,
+    status: String,
+    amount_usd_micros: i64,
+    balance_delta_usd_micros: i64,
+    created_at: String,
+    posted_at: Option<String>,
+    asset_symbol: Option<String>,
+    chain_id: Option<i64>,
+    network_name: Option<String>,
+    transaction_hash: Option<String>,
+    external_reference: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AdminLedgerPage {
+    entries: Vec<AdminLedgerEntry>,
+    total: i64,
+    limit: i64,
+    offset: i64,
 }
 
 #[derive(Deserialize)]
@@ -538,6 +606,8 @@ fn app(state: AppState) -> Router {
             "/admin/evm-config",
             get(read_evm_config).put(write_evm_config),
         )
+        .route("/admin/balances", get(list_admin_balances))
+        .route("/admin/ledger", get(list_admin_ledger))
         .route("/admin/deposits", get(list_admin_deposits))
         .route("/admin/deposits/:id/sweep", post(retry_sweep))
         .with_state(state);
@@ -647,12 +717,16 @@ async fn my_ledger(
     headers: HeaderMap,
 ) -> Result<Json<Vec<LedgerEntry>>, ApiError> {
     let user_id = require_initialized_user(&state, &headers).await?;
-    let rows = sqlx::query("SELECT e.id,e.kind,e.status,e.amount_usd_micros,e.balance_delta_usd_micros,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id WHERE e.user_id=?1 ORDER BY e.created_at DESC,e.id DESC LIMIT 100")
-        .bind(&user_id)
-        .fetch_all(&state.db)
+    Ok(Json(load_user_ledger(&state.db, &user_id).await?))
+}
+
+async fn load_user_ledger(db: &SqlitePool, user_id: &str) -> Result<Vec<LedgerEntry>, ApiError> {
+    let rows = sqlx::query("SELECT e.id,e.kind,e.status,e.amount_usd_micros,e.balance_delta_usd_micros,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE e.user_id=?1 ORDER BY e.created_at DESC,e.id DESC LIMIT 100")
+        .bind(user_id)
+        .fetch_all(db)
         .await
         .map_err(db_error)?;
-    Ok(Json(rows.into_iter().map(ledger_entry).collect()))
+    Ok(rows.into_iter().map(ledger_entry).collect())
 }
 
 fn ledger_entry(row: sqlx::sqlite::SqliteRow) -> LedgerEntry {
@@ -668,6 +742,8 @@ fn ledger_entry(row: sqlx::sqlite::SqliteRow) -> LedgerEntry {
         note: row.get(8),
         asset_symbol: row.get(9),
         chain_id: row.get(10),
+        network_name: row.get(11),
+        transaction_hash: row.get(12),
     }
 }
 
@@ -1358,6 +1434,165 @@ async fn list_admin_deposits(
             })
             .collect(),
     ))
+}
+
+async fn list_admin_balances(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminBalancesResponse>, ApiError> {
+    require_root(&state, &headers).await?;
+    Ok(Json(load_admin_balances(&state.db).await?))
+}
+
+async fn load_admin_balances(db: &SqlitePool) -> Result<AdminBalancesResponse, ApiError> {
+    let summary = sqlx::query("SELECT COUNT(*),COALESCE(SUM(CASE WHEN available_usd_micros>0 THEN 1 ELSE 0 END),0),COALESCE(SUM(available_usd_micros),0) FROM (SELECT u.id,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_micros ELSE 0 END),0) AS available_usd_micros FROM users u LEFT JOIN ledger_entries e ON e.user_id=u.id GROUP BY u.id)")
+        .fetch_one(db)
+        .await
+        .map_err(db_error)?;
+    let total_available_usd_micros: i64 = summary.get(2);
+    let users = sqlx::query("SELECT u.id,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_micros ELSE 0 END),0) FROM users u LEFT JOIN ledger_entries e ON e.user_id=u.id GROUP BY u.id,u.created_at ORDER BY 3 DESC,u.created_at DESC,u.id DESC")
+        .fetch_all(db)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(|row| {
+            let available_usd_micros: i64 = row.get(2);
+            AdminUserBalance {
+                user_id: row.get(0),
+                created_at: row.get(1),
+                available_usd_micros,
+                available_usd: format_usd(available_usd_micros),
+            }
+        })
+        .collect();
+    Ok(AdminBalancesResponse {
+        summary: AdminBalanceSummary {
+            user_count: summary.get(0),
+            funded_user_count: summary.get(1),
+            total_available_usd_micros,
+            total_available_usd: format_usd(total_available_usd_micros),
+        },
+        users,
+    })
+}
+
+async fn list_admin_ledger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AdminLedgerQuery>,
+) -> Result<Json<AdminLedgerPage>, ApiError> {
+    require_root(&state, &headers).await?;
+    Ok(Json(
+        load_admin_ledger(&state.db, admin_ledger_filters(query)?).await?,
+    ))
+}
+
+fn admin_ledger_filters(query: AdminLedgerQuery) -> Result<AdminLedgerFilters, ApiError> {
+    let kind = admin_ledger_filter(
+        query.kind,
+        &[
+            "deposit",
+            "withdrawal",
+            "transfer_in",
+            "transfer_out",
+            "adjustment",
+        ],
+        "kind",
+    )?;
+    let status = admin_ledger_filter(
+        query.status,
+        &["pending", "posted", "rejected", "disabled"],
+        "status",
+    )?;
+    let user_id = query
+        .user_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(user_id) = user_id.as_deref() {
+        Uuid::parse_str(user_id)
+            .map_err(|_| ApiError::invalid("user_id must be an Auth Mini UUID"))?;
+    }
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::invalid("limit must be between 1 and 100"));
+    }
+    let offset = query.offset.unwrap_or(0);
+    if offset < 0 {
+        return Err(ApiError::invalid("offset must not be negative"));
+    }
+    Ok(AdminLedgerFilters {
+        kind,
+        status,
+        user_id,
+        limit,
+        offset,
+    })
+}
+
+fn admin_ledger_filter(
+    value: Option<String>,
+    allowed: &[&str],
+    name: &str,
+) -> Result<Option<String>, ApiError> {
+    let value = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(value) = value.as_deref()
+        && !allowed.contains(&value)
+    {
+        return Err(ApiError::invalid(format!("{name} is not supported")));
+    }
+    Ok(value)
+}
+
+async fn load_admin_ledger(
+    db: &SqlitePool,
+    filters: AdminLedgerFilters,
+) -> Result<AdminLedgerPage, ApiError> {
+    let kind = filters.kind.as_deref();
+    let status = filters.status.as_deref();
+    let user_id = filters.user_id.as_deref();
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ledger_entries e WHERE (?1 IS NULL OR e.kind=?1) AND (?2 IS NULL OR e.status=?2) AND (?3 IS NULL OR e.user_id=?3)")
+        .bind(kind)
+        .bind(status)
+        .bind(user_id)
+        .fetch_one(db)
+        .await
+        .map_err(db_error)?;
+    let rows = sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_micros,e.balance_delta_usd_micros,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE (?1 IS NULL OR e.kind=?1) AND (?2 IS NULL OR e.status=?2) AND (?3 IS NULL OR e.user_id=?3) ORDER BY e.created_at DESC,e.id DESC LIMIT ?4 OFFSET ?5")
+        .bind(kind)
+        .bind(status)
+        .bind(user_id)
+        .bind(filters.limit)
+        .bind(filters.offset)
+        .fetch_all(db)
+        .await
+        .map_err(db_error)?;
+    Ok(AdminLedgerPage {
+        entries: rows
+            .into_iter()
+            .map(|row| AdminLedgerEntry {
+                id: row.get(0),
+                user_id: row.get(1),
+                counterparty_user_id: row.get(2),
+                kind: row.get(3),
+                status: row.get(4),
+                amount_usd_micros: row.get(5),
+                balance_delta_usd_micros: row.get(6),
+                created_at: row.get(7),
+                posted_at: row.get(8),
+                external_reference: row.get(9),
+                note: row.get(10),
+                asset_symbol: row.get(11),
+                chain_id: row.get(12),
+                network_name: row.get(13),
+                transaction_hash: row.get(14),
+            })
+            .collect(),
+        total,
+        limit: filters.limit,
+        offset: filters.offset,
+    })
 }
 
 async fn retry_sweep(
@@ -2583,6 +2818,150 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(available_balance(&db, &user_id).await.unwrap(), 1_500_000);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn admin_reports_balances_and_chain_transaction_metadata_for_ledger_entries() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let counterparty_user_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1),(?2)")
+            .bind(&user_id)
+            .bind(&counterparty_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        provision_user_wallet(&db, &user_id).await.unwrap();
+        let wallet_id: String =
+            sqlx::query_scalar("SELECT id FROM wallet_addresses WHERE user_id=?1")
+                .bind(&user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let deposit_ledger_id = Uuid::new_v4().to_string();
+        let withdrawal_ledger_id = Uuid::new_v4().to_string();
+        let transfer_ledger_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_micros,balance_delta_usd_micros,counterparty_user_id,external_reference,created_at) VALUES(?1,?2,'deposit','posted','56-USDT',2500000,2500000,NULL,'deposit-reference',?3),(?4,?2,'withdrawal','posted','1-USDC',750000,-750000,NULL,'withdrawal-reference',?3),(?5,?2,'transfer_out','posted',NULL,200000,-200000,?6,'transfer-reference',?3)")
+            .bind(&deposit_ledger_id)
+            .bind(&user_id)
+            .bind(&now)
+            .bind(&withdrawal_ledger_id)
+            .bind(&transfer_ledger_id)
+            .bind(&counterparty_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO deposits(id,user_id,wallet_address_id,asset_id,ledger_entry_id,transaction_hash,log_index,raw_amount,sweep_status,created_at) VALUES(?1,?2,?3,'56-USDT',?4,'0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0,'2500000000000000000','queued',?5)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&user_id)
+            .bind(&wallet_id)
+            .bind(&deposit_ledger_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,transaction_hash,status,created_at,updated_at) VALUES(?1,?2,'1-USDC',?3,'0x0000000000000000000000000000000000000001',750000,'0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','completed',?4,?4)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&user_id)
+            .bind(&withdrawal_ledger_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let balances = load_admin_balances(&db).await.unwrap();
+        assert_eq!(balances.summary.user_count, 2);
+        assert_eq!(balances.summary.funded_user_count, 1);
+        assert_eq!(balances.summary.total_available_usd_micros, 1_550_000);
+        assert_eq!(balances.users[0].user_id, user_id);
+        let personal_ledger = load_user_ledger(&db, &user_id).await.unwrap();
+        let personal_deposit = personal_ledger
+            .iter()
+            .find(|entry| entry.kind == "deposit")
+            .unwrap();
+        assert_eq!(
+            personal_deposit.network_name.as_deref(),
+            Some("BNB Smart Chain")
+        );
+        assert!(personal_deposit.transaction_hash.is_some());
+        assert!(
+            personal_ledger
+                .iter()
+                .find(|entry| entry.kind == "transfer_out")
+                .unwrap()
+                .transaction_hash
+                .is_none()
+        );
+        let ledger = load_admin_ledger(
+            &db,
+            admin_ledger_filters(AdminLedgerQuery::default()).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ledger.total, 3);
+        let deposit = ledger
+            .entries
+            .iter()
+            .find(|entry| entry.kind == "deposit")
+            .unwrap();
+        assert_eq!(deposit.network_name.as_deref(), Some("BNB Smart Chain"));
+        assert_eq!(deposit.asset_symbol.as_deref(), Some("USDT"));
+        assert!(deposit.transaction_hash.is_some());
+        let withdrawal = ledger
+            .entries
+            .iter()
+            .find(|entry| entry.kind == "withdrawal")
+            .unwrap();
+        assert_eq!(withdrawal.network_name.as_deref(), Some("Ethereum"));
+        assert_eq!(withdrawal.asset_symbol.as_deref(), Some("USDC"));
+        assert!(withdrawal.transaction_hash.is_some());
+        let transfer = ledger
+            .entries
+            .iter()
+            .find(|entry| entry.kind == "transfer_out")
+            .unwrap();
+        assert!(transfer.network_name.is_none());
+        assert!(transfer.transaction_hash.is_none());
+        let first_page = load_admin_ledger(
+            &db,
+            admin_ledger_filters(AdminLedgerQuery {
+                limit: Some(1),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let second_page = load_admin_ledger(
+            &db,
+            admin_ledger_filters(AdminLedgerQuery {
+                limit: Some(1),
+                offset: Some(1),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_page.total, 3);
+        assert_ne!(first_page.entries[0].id, second_page.entries[0].id);
+        let deposits = load_admin_ledger(
+            &db,
+            admin_ledger_filters(AdminLedgerQuery {
+                kind: Some("deposit".to_string()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deposits.total, 1);
+        assert_eq!(deposits.entries.len(), 1);
         let _ = std::fs::remove_file(path);
     }
 

@@ -52,8 +52,15 @@ paths:
       responses: { '200': { description: Balance, content: { application/json: { schema: { $ref: '#/components/schemas/Balance' } } } } }
   /ledger/me:
     get:
-      summary: Current caller's immutable USD ledger history
-      responses: { '200': { description: Ledger entries } }
+      summary: Current caller's immutable USD ledger history, with chain and transaction data for deposits and withdrawals
+      responses:
+        '200':
+          description: Ledger entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/LedgerEntry' }
   /wallet-addresses/me:
     get:
       summary: Current caller's automatically provisioned single EVM-compatible deposit address
@@ -144,6 +151,30 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/EvmConfigInput' }
       responses: { '200': { description: Saved configuration } }
+  /admin/balances:
+    get:
+      summary: Root-only all-user USD balance list and aggregate settlement exposure
+      responses:
+        '200':
+          description: Exact available balances for every Midas user and their aggregate
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminBalancesResponse' }
+  /admin/ledger:
+    get:
+      summary: Root-only global immutable ledger with action, status, user, and pagination filters
+      parameters:
+        - { name: kind, in: query, schema: { type: string, enum: [deposit, withdrawal, transfer_in, transfer_out, adjustment] } }
+        - { name: status, in: query, schema: { type: string, enum: [pending, posted, rejected, disabled] } }
+        - { name: user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200':
+          description: Filtered ledger page. Only deposit and withdrawal entries include chain transaction metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminLedgerPage' }
   /admin/deposits:
     get:
       summary: Root-only deposit and collection-operation history, newest first
@@ -178,6 +209,64 @@ components:
         currency: { const: USD }
         available_usd_micros: { type: integer, format: int64, description: Exact USD micro-dollars }
         available_usd: { type: string, example: '12.500000' }
+    LedgerEntry:
+      type: object
+      required: [id, kind, status, amount_usd_micros, balance_delta_usd_micros, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [deposit, withdrawal, transfer_in, transfer_out, adjustment] }
+        status: { type: string, enum: [pending, posted, rejected, disabled] }
+        amount_usd_micros: { type: integer, format: int64 }
+        balance_delta_usd_micros: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        posted_at: { type: [string, 'null'], format: date-time }
+        asset_symbol: { type: [string, 'null'], enum: [USDC, USDT, null] }
+        chain_id: { type: [integer, 'null'], enum: [1, 10, 56, 137, 8453, 42161, null] }
+        network_name: { type: [string, 'null'] }
+        transaction_hash: { type: [string, 'null'], pattern: '^0x[a-fA-F0-9]{64}$' }
+        external_reference: { type: [string, 'null'] }
+        note: { type: [string, 'null'] }
+    AdminUserBalance:
+      type: object
+      required: [user_id, created_at, available_usd_micros, available_usd]
+      properties:
+        user_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        available_usd_micros: { type: integer, format: int64 }
+        available_usd: { type: string }
+    AdminBalancesResponse:
+      type: object
+      required: [summary, users]
+      properties:
+        summary:
+          type: object
+          required: [user_count, funded_user_count, total_available_usd_micros, total_available_usd]
+          properties:
+            user_count: { type: integer }
+            funded_user_count: { type: integer }
+            total_available_usd_micros: { type: integer, format: int64 }
+            total_available_usd: { type: string }
+        users:
+          type: array
+          items: { $ref: '#/components/schemas/AdminUserBalance' }
+    AdminLedgerEntry:
+      allOf:
+        - { $ref: '#/components/schemas/LedgerEntry' }
+        - type: object
+          required: [user_id]
+          properties:
+            user_id: { type: string, format: uuid }
+            counterparty_user_id: { type: [string, 'null'], format: uuid }
+    AdminLedgerPage:
+      type: object
+      required: [entries, total, limit, offset]
+      properties:
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/AdminLedgerEntry' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
     DepositRequest:
       type: object
       required: [asset_id, transaction_hash]

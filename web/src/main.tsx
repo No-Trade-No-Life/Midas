@@ -12,15 +12,21 @@ import {
   ArrowDownToLineIcon,
   ArrowLeftRightIcon,
   ArrowUpFromLineIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
   ClipboardCopyIcon,
+  ExternalLinkIcon,
   Globe2Icon,
   HistoryIcon,
   LandmarkIcon,
   LoaderCircleIcon,
+  MenuIcon,
   RefreshCwIcon,
   RotateCcwIcon,
+  ScrollTextIcon,
   SettingsIcon,
   ShieldCheckIcon,
+  UsersRoundIcon,
   WalletCardsIcon,
 } from "lucide-react"
 
@@ -48,36 +54,43 @@ type Balance = { currency: "USD"; available_usd_micros: number; available_usd: s
 type Network = { chain_id: number; name: string }
 type Asset = { id: string; chain_id: number; symbol: "USDC" | "USDT"; contract_address: string; token_decimals: number; enabled: boolean; network_name?: string }
 type WalletAddress = { address: string; created_at: string }
-type LedgerEntry = { id: string; kind: string; status: string; amount_usd_micros: number; balance_delta_usd_micros: number; created_at: string; asset_symbol: string | null; external_reference: string | null; note: string | null }
+type LedgerEntry = { id: string; kind: string; status: string; amount_usd_micros: number; balance_delta_usd_micros: number; created_at: string; asset_symbol: string | null; chain_id: number | null; network_name: string | null; transaction_hash: string | null; external_reference: string | null; note: string | null }
 type Deposit = { id: string; amount_usd: string; amount_usd_micros: number; asset_symbol: string; transaction_hash: string; sweep_status: string }
 type AdminDeposit = { id: string; user_id: string; deposit_address: string; asset_symbol: string; chain_id: number; network_name: string; amount_usd_micros: number; amount_usd: string; transaction_hash: string; sweep_status: string; created_at: string; sweep_operation_status: string; gas_transaction_hash: string | null; token_transaction_hash: string | null; sweep_error_message: string | null; sweep_updated_at: string }
+type AdminBalanceSummary = { user_count: number; funded_user_count: number; total_available_usd_micros: number; total_available_usd: string }
+type AdminUserBalance = { user_id: string; created_at: string; available_usd_micros: number; available_usd: string }
+type AdminBalances = { summary: AdminBalanceSummary; users: AdminUserBalance[] }
+type AdminLedgerEntry = LedgerEntry & { user_id: string; counterparty_user_id: string | null }
+type AdminLedgerPage = { entries: AdminLedgerEntry[]; total: number; limit: number; offset: number }
 type AddressBookEntry = { id: string; chain_id: number; chain_name: string; label: string; address: string; created_at: string; updated_at: string }
 type Withdrawal = { id: string; asset_symbol: string; destination_address: string; address_book_entry_id: string | null; destination_label: string | null; amount_usd: string; amount_usd_micros: number; transaction_hash: string | null; status: string }
 type EvmConfig = { custody_wallet_address: string | null; custody_wallet_private_key_configured: boolean; networks: Network[]; assets: Asset[] }
 
 const messages = {
   en: {
-    appName: "Midas", home: "Home", activity: "Activity", settings: "Settings", language: "Language", english: "English", chinese: "中文",
+    appName: "Midas", menu: "Menu", home: "Home", activity: "Activity", settings: "Settings", account: "Account", administration: "Administration", custody: "Custody wallet", userBalances: "User balances", globalLedger: "Global ledger", language: "Language", english: "English", chinese: "中文",
     balance: "Available balance", usdOnly: "USD ledger", deposit: "Deposit", transfer: "Transfer", withdraw: "Withdraw", depositAddress: "Your deposit address", depositAddressHint: "This single EVM-compatible address works on every supported network.", depositQrHint: "Scan to copy this deposit address", copy: "Copy", copied: "Address copied", noAddress: "Your dedicated EVM address is being prepared. Refresh shortly.",
-    noActivity: "No activity yet", noActivityBody: "Confirmed deposits, transfers, and withdrawals appear here as immutable USD entries.", amount: "Amount", status: "Status", asset: "Asset", time: "Time", reference: "Reference", details: "Details",
+    noActivity: "No activity yet", noActivityBody: "Confirmed deposits, transfers, and withdrawals appear here as immutable USD entries.", amount: "Amount", status: "Status", asset: "Asset", blockchain: "Blockchain", transaction: "Transaction", action: "Action", user: "User", time: "Time", reference: "Reference", details: "Details", viewOnExplorer: "View on explorer",
     depositTitle: "Confirm a deposit", depositBody: "Choose the received asset, send it to your dedicated address, then submit the confirmed transaction hash. Midas verifies that exact receipt; it does not scan the chain.", network: "Network", transactionHash: "Transaction hash", confirmDeposit: "Confirm deposit",
     transferTitle: "Transfer USD", transferBody: "Search the Linkit directory by username, then send USD atomically. Midas automatically creates the recipient's account and wallet if needed.", recipient: "Recipient", recipientHint: "Search a Linkit username. The selected recipient receives a Midas account and dedicated wallet automatically.", usdAmount: "USD amount", sendTransfer: "Send transfer", profile: "Linkit profile", unknownProfile: "No Linkit profile found; choose a recipient from the Linkit directory.",
     withdrawTitle: "Withdraw stablecoin", withdrawBody: "Choose a network and token, then enter the EVM address that should receive the withdrawal.", destination: "Destination", requestWithdrawal: "Request withdrawal", finalize: "Finalize", noWithdrawals: "No withdrawals yet", awaitingSigner: "Awaiting custody signer", submitted: "Submitted", completed: "Completed", failed: "Failed", addressBook: "Saved withdrawal destinations", addressBookBody: "Save and label destinations from withdrawal history after you use them.", addressLabel: "Address label", addressAdded: "Destination saved", renameAddress: "Rename", saveAddress: "Save", saveDestination: "Save destination", removeAddress: "Remove", savedDestination: "Saved destination",
     setupTitle: "Initialize Midas", setupBody: "The first authenticated user becomes the root operator. This action can only happen once.", initialize: "Initialize as root", initialized: "Midas is initialized", rootOnly: "Only the root operator can edit EVM custody configuration.",
     rootConfig: "Custody wallet", rootConfigBody: "Midas has built-in Ethereum, BNB Smart Chain, Base, Arbitrum, OP Mainnet, and Polygon USDC/USDT mappings and public RPCs. Enter one private key; Midas derives its address and uses it for gas, collection, and withdrawals.", custodyPrivateKey: "Custody wallet private key", custodyAddress: "Custody wallet address", saveConfiguration: "Save configuration", secretsConfigured: "Custody wallet configured", noNetworks: "No supported EVM network is available.",
     collectionOperations: "Collection operations", collectionOperationsBody: "All credited deposits and their gas-funding and token-collection state. Only records that were not submitted can be retried.", noCollectionOperations: "No deposit collections yet", noCollectionOperationsBody: "Credited deposits will appear here with their collection status.", collectionUser: "User ID", collectionGasTransaction: "Gas transaction", collectionTokenTransaction: "Collection transaction", collectionError: "Last error", retryCollection: "Retry collection", retryCollectionTitle: "Retry this collection?", retryCollectionBody: "Midas will fund the deposit address with gas and submit its token collection transaction. Only retry after reviewing the current status and transaction references.", retryCollectionNotice: "This sends on-chain transactions and cannot be undone.", collectionRetryStarted: "Collection retry submitted", collectionQueued: "Queued", collectionAwaitingConfiguration: "Awaiting configuration", collectionSubmitted: "Submitted", collectionFailed: "Failed", collectionSwept: "Swept",
+    userBalancesTitle: "User balances", userBalancesBody: "All Midas accounts and their currently available USD balance.", totalHeld: "Total balance held", fundedAccounts: "Funded accounts", allAccounts: "All accounts", noUsers: "No Midas accounts yet", globalLedgerTitle: "Global ledger", globalLedgerBody: "All immutable Midas ledger entries, including on-chain context when a deposit or withdrawal has a transaction.", allKinds: "All actions", allStatuses: "All statuses", transferIn: "Transfer in", transferOut: "Transfer out", adjustment: "Adjustment", pending: "Pending", posted: "Posted", rejected: "Rejected", disabled: "Disabled", filter: "Apply filters", userIdFilter: "User ID", userIdFilterHint: "Exact Auth Mini UUID", totalEntries: "Total entries", previous: "Previous", next: "Next", page: "Page", noLedgerEntries: "No ledger entries match these filters.",
     loading: "Loading account…", requestFailed: "Request failed", unknownRequestError: "Midas could not complete the request. Please try again.", evmRpcUnavailable: "Midas could not read this transaction from the blockchain. Your balance was not changed; please try again shortly.", transactionNotConfirmed: "This transaction is not confirmed on-chain yet. Please try again shortly.", transactionReverted: "This transaction reverted on-chain and cannot be credited.", depositTransferMissing: "No transfer of the selected asset to this deposit address was found. Check the network, asset, and transaction hash.", depositAlreadyCredited: "This on-chain transfer has already been credited.", openApi: "Open API", security: "Authenticated with Auth Mini · identity surfaces from Linkit", confirm: "Confirm", cancel: "Cancel", refresh: "Refresh", wallet: "Wallet",
   },
   zh: {
-    appName: "Midas", home: "首页", activity: "流水", settings: "设置", language: "语言", english: "English", chinese: "中文",
+    appName: "Midas", menu: "菜单", home: "首页", activity: "流水", settings: "设置", account: "账户", administration: "后台管理", custody: "托管钱包", userBalances: "用户余额", globalLedger: "全局流水", language: "语言", english: "English", chinese: "中文",
     balance: "可用余额", usdOnly: "USD 账本", deposit: "充值", transfer: "转账", withdraw: "提现", depositAddress: "你的充值地址", depositAddressHint: "同一个 EVM 兼容地址可用于所有已支持的网络。", depositQrHint: "扫描二维码获取充值地址", copy: "复制", copied: "地址已复制", noAddress: "专属 EVM 地址正在准备，请稍后刷新。",
-    noActivity: "暂无流水", noActivityBody: "确认后的充值、转账和提现会以不可变的 USD 记录显示在这里。", amount: "金额", status: "状态", asset: "资产", time: "时间", reference: "参考号", details: "详情",
+    noActivity: "暂无流水", noActivityBody: "确认后的充值、转账和提现会以不可变的 USD 记录显示在这里。", amount: "金额", status: "状态", asset: "资产", blockchain: "区块链", transaction: "交易", action: "动作", user: "用户", time: "时间", reference: "参考号", details: "详情", viewOnExplorer: "在区块浏览器中查看",
     depositTitle: "确认充值", depositBody: "选择收到的资产，转入专属地址后提交已确认的交易哈希。Midas 只验证该笔收据，不扫描区块链。", network: "网络", transactionHash: "交易哈希", confirmDeposit: "确认充值",
     transferTitle: "转账 USD", transferBody: "按 Linkit 用户名检索收款人并原子地转入 USD；如有需要，Midas 会自动创建收款人的账户和钱包。", recipient: "收款人", recipientHint: "搜索 Linkit 用户名；选中的收款人会自动获得 Midas 账户和专属钱包。", usdAmount: "USD 金额", sendTransfer: "发送转账", profile: "Linkit 资料", unknownProfile: "未找到 Linkit 资料；请从 Linkit 目录中选择收款人。",
     withdrawTitle: "提现稳定币", withdrawBody: "先选择网络和代币，再输入接收提现的 EVM 地址。", destination: "目标地址", requestWithdrawal: "请求提现", finalize: "最终确认", noWithdrawals: "暂无提现", awaitingSigner: "等待托管钱包签名", submitted: "已提交", completed: "已完成", failed: "失败", addressBook: "已保存的提现目标地址", addressBookBody: "在使用提现后，可从提现记录中保存并标记地址。", addressLabel: "地址标签", addressAdded: "目标地址已保存", renameAddress: "重命名", saveAddress: "保存", saveDestination: "保存目标地址", removeAddress: "删除", savedDestination: "已保存目标地址",
     setupTitle: "初始化 Midas", setupBody: "第一位认证用户将成为根管理员。该操作只能执行一次。", initialize: "初始化为根管理员", initialized: "Midas 已初始化", rootOnly: "只有根管理员可以修改 EVM 托管配置。",
     rootConfig: "托管钱包", rootConfigBody: "Midas 已内置 Ethereum、BNB Smart Chain、Base、Arbitrum、OP Mainnet、Polygon 的 USDC/USDT 映射与公共 RPC。只需输入一个私钥，Midas 会推导地址并用于 Gas、归集和提现。", custodyPrivateKey: "托管钱包私钥", custodyAddress: "托管钱包地址", saveConfiguration: "保存配置", secretsConfigured: "托管钱包已配置", noNetworks: "暂无支持的 EVM 网络。",
     collectionOperations: "归集流水", collectionOperationsBody: "查看全部已入账充值，以及 Gas 充值和代币归集状态。只有尚未提交的记录可以重新归集。", noCollectionOperations: "暂无归集流水", noCollectionOperationsBody: "已入账充值会在这里显示归集状态。", collectionUser: "用户 ID", collectionGasTransaction: "Gas 交易", collectionTokenTransaction: "归集交易", collectionError: "最近错误", retryCollection: "重新归集", retryCollectionTitle: "重新归集这笔充值？", retryCollectionBody: "Midas 会向充值地址补充 Gas，并提交该地址的代币归集交易。请先核对当前状态与交易参考号。", retryCollectionNotice: "此操作会发送链上交易，无法撤销。", collectionRetryStarted: "已提交重新归集", collectionQueued: "待归集", collectionAwaitingConfiguration: "等待配置", collectionSubmitted: "已提交", collectionFailed: "失败", collectionSwept: "已归集",
+    userBalancesTitle: "用户余额", userBalancesBody: "查看全部 Midas 账户及其当前可用 USD 余额。", totalHeld: "沉淀总余额", fundedAccounts: "有余额账户", allAccounts: "全部账户", noUsers: "暂无 Midas 账户", globalLedgerTitle: "全局流水", globalLedgerBody: "查看全部不可变 Midas 流水；充值和提现会在有链上交易时显示链上信息。", allKinds: "全部动作", allStatuses: "全部状态", transferIn: "转入", transferOut: "转出", adjustment: "调账", pending: "待处理", posted: "已入账", rejected: "已拒绝", disabled: "已停用", filter: "应用筛选", userIdFilter: "用户 ID", userIdFilterHint: "精确的 Auth Mini UUID", totalEntries: "流水总数", previous: "上一页", next: "下一页", page: "页", noLedgerEntries: "没有符合这些筛选条件的流水。",
     loading: "正在加载账户…", requestFailed: "请求失败", unknownRequestError: "Midas 未能完成请求，请稍后重试。", evmRpcUnavailable: "Midas 暂时无法从区块链读取这笔交易。余额未变更，请稍后重试。", transactionNotConfirmed: "这笔交易尚未在链上确认，请稍后重试。", transactionReverted: "这笔交易已在链上回滚，无法入账。", depositTransferMissing: "未找到发送到当前充值地址的所选代币转账。请检查网络、代币和交易哈希。", depositAlreadyCredited: "这笔链上转账已经入账，不能重复充值。", openApi: "开放 API", security: "使用 Auth Mini 认证 · 使用 Linkit 身份资料", confirm: "确认", cancel: "取消", refresh: "刷新", wallet: "钱包",
   },
 } as const
@@ -114,6 +127,7 @@ function GlobalToaster() {
 
 function App() {
   const [language, setLanguage] = useState<Language>(() => window.localStorage.getItem("midas-language") === "zh" ? "zh" : "en")
+  const [navigationOpen, setNavigationOpen] = useState(false)
   const t = (key: keyof typeof messages.en) => messages[language][key]
   const auth = useAuthMini()
   const location = useLocation()
@@ -126,23 +140,26 @@ function App() {
   return <div className="min-h-dvh bg-background">
     <header className="sticky top-0 border-b bg-background">
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-        <Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><LandmarkIcon aria-hidden="true" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link>
-        <DesktopNavigation currentPath={location.pathname} t={t} />
+        <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button><Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><LandmarkIcon aria-hidden="true" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
         <div className="flex shrink-0 items-center gap-1">
           <LanguageMenu language={language} setLanguage={setLanguage} t={t} />
           <LinkitAppHeaderUser className="inline-flex max-w-24 min-w-0 shrink-0 items-center gap-2 overflow-hidden whitespace-nowrap sm:max-w-44 [&>.linkit-app-header-user__name]:truncate" lang={language === "zh" ? "zh-CN" : "en"} />
         </div>
       </div>
     </header>
-    <main id="main-content" className="mx-auto w-full max-w-5xl px-4 py-6 pb-24 sm:px-6 sm:py-8">
+    <main id="main-content" className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
       <Routes>
         <Route path="/" element={<Dashboard t={t} language={language} />} />
         <Route path="/activity" element={<ActivityPage t={t} />} />
-        <Route path="/settings" element={<SettingsPage t={t} root={root} setup={setup.data} currentUserId={currentUserId} />} />
+        <Route path="/settings" element={<SettingsPage t={t} setup={setup.data} currentUserId={currentUserId} />} />
+        <Route path="/admin/custody" element={<AdminRoute t={t} root={root}><RootConfigPage t={t} /></AdminRoute>} />
+        <Route path="/admin/collections" element={<AdminRoute t={t} root={root}><RootCollectionsPage t={t} /></AdminRoute>} />
+        <Route path="/admin/balances" element={<AdminRoute t={t} root={root}><AdminBalancesPage t={t} /></AdminRoute>} />
+        <Route path="/admin/ledger" element={<AdminRoute t={t} root={root}><AdminLedgerPage t={t} /></AdminRoute>} />
         <Route path="*" element={<Dashboard t={t} language={language} />} />
       </Routes>
     </main>
-    {auth.isAuthenticated && <Navigation currentPath={location.pathname} t={t} />}
+    {auth.isAuthenticated && <NavigationDrawer currentPath={location.pathname} t={t} root={root} open={navigationOpen} setOpen={setNavigationOpen} />}
   </div>
 }
 
@@ -190,7 +207,14 @@ function ActivityPage({ t }: { t: Translate }) {
 }
 
 function LedgerTable({ t, entries, compact = false }: { t: Translate; entries: LedgerEntry[]; compact?: boolean }) {
-  return <><div className="flex flex-col sm:hidden">{entries.map((entry, index) => <div key={entry.id}><div className="flex items-start justify-between gap-3 py-3"><div className="min-w-0"><div className="flex items-center gap-2"><span className="font-medium capitalize">{entry.kind.replace("_", " ")}</span><Badge variant="outline">{entry.asset_symbol ?? "USD"}</Badge></div><span className="block truncate text-muted-foreground text-xs">{entry.note ?? entry.external_reference ?? entry.id}</span><span className="text-muted-foreground text-xs">{new Date(entry.created_at).toLocaleString()}</span></div><div className="flex shrink-0 flex-col items-end gap-1"><span className="font-medium tabular-nums">{entry.balance_delta_usd_micros < 0 ? "−" : "+"}${formatMicros(Math.abs(entry.balance_delta_usd_micros))}</span><StatusBadge status={entry.status} /></div></div>{index < entries.length - 1 ? <Separator /> : null}</div>)}</div><div className="hidden sm:block"><Table><TableHeader><TableRow><TableHead>{t("details")}</TableHead><TableHead>{t("asset")}</TableHead><TableHead>{t("status")}</TableHead><TableHead className="text-right">{t("amount")}</TableHead>{!compact && <TableHead>{t("time")}</TableHead>}</TableRow></TableHeader><TableBody>{entries.map((entry) => <TableRow key={entry.id}><TableCell><div className="flex flex-col gap-1"><span className="font-medium capitalize">{entry.kind.replace("_", " ")}</span><span className="max-w-40 truncate text-muted-foreground text-xs">{entry.note ?? entry.external_reference ?? entry.id}</span></div></TableCell><TableCell>{entry.asset_symbol ?? "USD"}</TableCell><TableCell><StatusBadge status={entry.status} /></TableCell><TableCell className="text-right"><span className="font-medium tabular-nums">{entry.balance_delta_usd_micros < 0 ? "−" : "+"}${formatMicros(Math.abs(entry.balance_delta_usd_micros))}</span></TableCell>{!compact && <TableCell className="whitespace-nowrap"><span className="text-muted-foreground">{new Date(entry.created_at).toLocaleString()}</span></TableCell>}</TableRow>)}</TableBody></Table></div></>
+  return <><div className="flex flex-col sm:hidden">{entries.map((entry, index) => <div key={entry.id}><div className="flex items-start justify-between gap-3 py-3"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="font-medium capitalize">{ledgerActionLabel(entry.kind, t)}</span><StatusBadge t={t} status={entry.status} /></div><span className="mt-1 block truncate text-muted-foreground text-xs">{entry.note ?? entry.external_reference ?? entry.id}</span><ChainTransactionDetails entry={entry} t={t} /><span className="mt-1 text-muted-foreground text-xs">{formatTime(entry.created_at)}</span></div><span className="shrink-0 font-medium tabular-nums">{entry.balance_delta_usd_micros < 0 ? "−" : "+"}${formatMicros(Math.abs(entry.balance_delta_usd_micros))}</span></div>{index < entries.length - 1 ? <Separator /> : null}</div>)}</div><div className="hidden sm:block"><Table><TableHeader><TableRow><TableHead>{t("action")}</TableHead><TableHead>{t("blockchain")}</TableHead><TableHead>{t("status")}</TableHead><TableHead className="text-right">{t("amount")}</TableHead>{!compact && <TableHead>{t("time")}</TableHead>}</TableRow></TableHeader><TableBody>{entries.map((entry) => <TableRow key={entry.id}><TableCell><div className="flex flex-col gap-1"><span className="font-medium capitalize">{ledgerActionLabel(entry.kind, t)}</span><span className="max-w-40 truncate text-muted-foreground text-xs">{entry.note ?? entry.external_reference ?? entry.id}</span></div></TableCell><TableCell><ChainTransactionDetails entry={entry} t={t} /></TableCell><TableCell><StatusBadge t={t} status={entry.status} /></TableCell><TableCell className="text-right"><span className="font-medium tabular-nums">{entry.balance_delta_usd_micros < 0 ? "−" : "+"}${formatMicros(Math.abs(entry.balance_delta_usd_micros))}</span></TableCell>{!compact && <TableCell className="whitespace-nowrap"><span className="text-muted-foreground">{formatTime(entry.created_at)}</span></TableCell>}</TableRow>)}</TableBody></Table></div></>
+}
+
+function ChainTransactionDetails({ entry, t }: { entry: LedgerEntry; t: Translate }) {
+  const url = transactionExplorerUrl(entry.chain_id, entry.transaction_hash)
+  const transactionHash = entry.transaction_hash
+  if (!entry.network_name || !entry.asset_symbol) return <span className="text-muted-foreground">—</span>
+  return <div className="flex min-w-0 flex-wrap items-center gap-1.5"><Badge variant="outline">{entry.network_name}</Badge><Badge variant="outline">{entry.asset_symbol}</Badge>{url && transactionHash ? <a href={url} target="_blank" rel="noreferrer" aria-label={t("viewOnExplorer")} className="inline-flex min-w-0 items-center gap-1 text-muted-foreground hover:text-foreground"><code className="max-w-28 truncate text-xs">{shortTransactionHash(transactionHash)}</code><ExternalLinkIcon className="size-3" /></a> : <span className="text-muted-foreground">—</span>}</div>
 }
 
 function DepositDrawer({ open, setOpen, t, assets }: { open: boolean; setOpen: (open: boolean) => void; t: Translate; assets: Asset[] }) {
@@ -236,14 +260,13 @@ function UsdField({ t, amount, setAmount }: { t: Translate; amount: string; setA
   return <Field data-invalid={invalid}><FieldLabel htmlFor="usd-amount">{t("usdAmount")}</FieldLabel><Input id="usd-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} aria-invalid={invalid} placeholder="0.000000" /><FieldDescription>USD · 6 decimals</FieldDescription></Field>
 }
 
-function SettingsPage({ t, root, setup, currentUserId }: { t: Translate; root: boolean; setup?: SetupStatus; currentUserId: string | null }) {
+function SettingsPage({ t, setup, currentUserId }: { t: Translate; setup?: SetupStatus; currentUserId: string | null }) {
   const api = useApi()
   const queryClient = useQueryClient()
   const initialize = useMutation({ mutationFn: () => api<SetupStatus>("/api/setup/initialize", { method: "POST", body: { root_user_id: currentUserId } }), onSuccess: () => { toast.success(t("initialized")); void queryClient.invalidateQueries({ queryKey: ["setup"] }) }, onError: (error) => showApiError(error, t) })
   const withdrawals = useQuery({ queryKey: ["withdrawals"], queryFn: () => api<Withdrawal[]>("/api/withdrawals/me"), enabled: Boolean(setup?.initialized) })
   return <section className="flex flex-col gap-6"><div><p className="text-sm text-muted-foreground">{t("wallet")}</p><h1 className="text-2xl font-semibold tracking-tight">{t("settings")}</h1></div>
     {!setup?.initialized ? <Card><CardHeader><CardTitle>{t("setupTitle")}</CardTitle><CardDescription>{t("setupBody")}</CardDescription></CardHeader><CardFooter><Button disabled={!currentUserId || initialize.isPending} onClick={() => initialize.mutate()}>{initialize.isPending && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />}{t("initialize")}</Button></CardFooter></Card> : null}
-    {root ? <><RootConfig t={t} /><RootSweepHistory t={t} /></> : setup?.initialized ? <Alert><ShieldCheckIcon /><AlertTitle>{t("rootOnly")}</AlertTitle><AlertDescription>{t("security")}</AlertDescription></Alert> : null}
     {setup?.initialized ? <AddressBookCard t={t} /> : null}
     <Card><CardHeader><CardTitle>{t("withdraw")}</CardTitle><CardDescription>{t("withdrawBody")}</CardDescription></CardHeader><CardContent>{withdrawals.isLoading ? <Skeleton className="h-20 w-full" /> : withdrawals.data?.length ? <div className="flex flex-col gap-3">{withdrawals.data.map((withdrawal) => <WithdrawalRow key={withdrawal.id} withdrawal={withdrawal} t={t} />)}</div> : <Empty><EmptyHeader><EmptyMedia variant="icon"><ArrowUpFromLineIcon /></EmptyMedia><EmptyTitle>{t("noWithdrawals")}</EmptyTitle><EmptyDescription>{t("withdrawBody")}</EmptyDescription></EmptyHeader></Empty>}</CardContent></Card>
   </section>
@@ -255,7 +278,7 @@ function WithdrawalRow({ withdrawal, t }: { withdrawal: Withdrawal; t: Translate
   const [label, setLabel] = useState("")
   const finalize = useMutation({ mutationFn: () => api<Withdrawal>(`/api/withdrawals/${withdrawal.id}/finalize`, { method: "POST" }), onSuccess: () => { toast.success(t("finalize")); void queryClient.invalidateQueries({ queryKey: ["withdrawals"] }); void queryClient.invalidateQueries({ queryKey: ["balance"] }); void queryClient.invalidateQueries({ queryKey: ["ledger"] }) }, onError: (error) => showApiError(error, t) })
   const saveDestination = useMutation({ mutationFn: () => api<AddressBookEntry>(`/api/withdrawals/${withdrawal.id}/address-book`, { method: "POST", body: { label } }), onSuccess: () => { toast.success(t("addressAdded")); setLabel(""); void queryClient.invalidateQueries({ queryKey: ["withdrawals"] }); void queryClient.invalidateQueries({ queryKey: ["address-book"] }) }, onError: (error) => showApiError(error, t) })
-  return <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><span className="font-medium">${withdrawal.amount_usd}</span><Badge variant="outline">{withdrawal.asset_symbol}</Badge><StatusBadge status={withdrawal.status} />{withdrawal.destination_label ? <Badge variant="secondary">{withdrawal.destination_label}</Badge> : null}</div><code className="block max-w-72 truncate text-muted-foreground text-xs">{withdrawal.destination_address}</code></div><div className="flex flex-wrap items-center justify-end gap-2">{!withdrawal.address_book_entry_id ? <form onSubmit={(event) => { event.preventDefault(); saveDestination.mutate() }}><FieldGroup className="flex-row items-center gap-2"><Field><FieldLabel className="sr-only" htmlFor={`withdrawal-label-${withdrawal.id}`}>{t("addressLabel")}</FieldLabel><Input id={`withdrawal-label-${withdrawal.id}`} value={label} onChange={(event) => setLabel(event.target.value)} maxLength={80} placeholder={t("addressLabel")} /></Field><Button size="sm" type="submit" disabled={saveDestination.isPending || !label.trim()}>{saveDestination.isPending && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />}{t("saveDestination")}</Button></FieldGroup></form> : null}{withdrawal.status === "submitted" ? <Button size="sm" variant="outline" disabled={finalize.isPending} onClick={() => finalize.mutate()}>{finalize.isPending && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />}{t("finalize")}</Button> : null}</div></div>
+  return <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><span className="font-medium">${withdrawal.amount_usd}</span><Badge variant="outline">{withdrawal.asset_symbol}</Badge><StatusBadge t={t} status={withdrawal.status} />{withdrawal.destination_label ? <Badge variant="secondary">{withdrawal.destination_label}</Badge> : null}</div><code className="block max-w-72 truncate text-muted-foreground text-xs">{withdrawal.destination_address}</code></div><div className="flex flex-wrap items-center justify-end gap-2">{!withdrawal.address_book_entry_id ? <form onSubmit={(event) => { event.preventDefault(); saveDestination.mutate() }}><FieldGroup className="flex-row items-center gap-2"><Field><FieldLabel className="sr-only" htmlFor={`withdrawal-label-${withdrawal.id}`}>{t("addressLabel")}</FieldLabel><Input id={`withdrawal-label-${withdrawal.id}`} value={label} onChange={(event) => setLabel(event.target.value)} maxLength={80} placeholder={t("addressLabel")} /></Field><Button size="sm" type="submit" disabled={saveDestination.isPending || !label.trim()}>{saveDestination.isPending && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />}{t("saveDestination")}</Button></FieldGroup></form> : null}{withdrawal.status === "submitted" ? <Button size="sm" variant="outline" disabled={finalize.isPending} onClick={() => finalize.mutate()}>{finalize.isPending && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />}{t("finalize")}</Button> : null}</div></div>
 }
 
 function RootConfig({ t }: { t: Translate }) {
@@ -279,6 +302,58 @@ function RootSweepHistory({ t }: { t: Translate }) {
   if (deposits.error) return <RequestError t={t} error={deposits.error} />
   const rows = deposits.data ?? []
   return <><Card><CardHeader><CardTitle>{t("collectionOperations")}</CardTitle><CardDescription>{t("collectionOperationsBody")}</CardDescription><CardAction><Button aria-label={t("refresh")} size="icon" variant="ghost" disabled={deposits.isFetching} onClick={() => void deposits.refetch()}><RefreshCwIcon /></Button></CardAction></CardHeader><CardContent>{rows.length ? <SweepHistoryTable t={t} entries={rows} onRetry={setSelected} /> : <Empty><EmptyHeader><EmptyMedia variant="icon"><LandmarkIcon /></EmptyMedia><EmptyTitle>{t("noCollectionOperations")}</EmptyTitle><EmptyDescription>{t("noCollectionOperationsBody")}</EmptyDescription></EmptyHeader></Empty>}</CardContent></Card><RetrySweepDrawer t={t} deposit={selected} pending={retry.isPending} onOpenChange={(open) => !open && setSelected(null)} onConfirm={() => selected && retry.mutate(selected.id)} /></>
+}
+
+function RootConfigPage({ t }: { t: Translate }) {
+  return <section className="flex flex-col gap-6"><AdminPageHeading t={t} title={t("custody")} body={t("rootConfigBody")} /><RootConfig t={t} /></section>
+}
+
+function RootCollectionsPage({ t }: { t: Translate }) {
+  return <section className="flex flex-col gap-6"><AdminPageHeading t={t} title={t("collectionOperations")} body={t("collectionOperationsBody")} /><RootSweepHistory t={t} /></section>
+}
+
+function AdminBalancesPage({ t }: { t: Translate }) {
+  const api = useApi()
+  const balances = useQuery({ queryKey: ["admin-balances"], queryFn: () => api<AdminBalances>("/api/admin/balances") })
+  if (balances.isLoading) return <LoadingScreen t={t} />
+  if (balances.error) return <RequestError t={t} error={balances.error} />
+  const data = balances.data
+  if (!data) return null
+  return <section className="flex flex-col gap-6"><AdminPageHeading t={t} title={t("userBalancesTitle")} body={t("userBalancesBody")} /><Card><CardContent className="pt-6"><dl className="grid gap-5 sm:grid-cols-3"><div className="flex flex-col gap-1"><dt className="text-sm text-muted-foreground">{t("totalHeld")}</dt><dd className="text-2xl font-semibold tabular-nums">${formatUsd(data.summary.total_available_usd)}</dd></div><div className="flex flex-col gap-1"><dt className="text-sm text-muted-foreground">{t("fundedAccounts")}</dt><dd className="text-2xl font-semibold tabular-nums">{data.summary.funded_user_count}</dd></div><div className="flex flex-col gap-1"><dt className="text-sm text-muted-foreground">{t("allAccounts")}</dt><dd className="text-2xl font-semibold tabular-nums">{data.summary.user_count}</dd></div></dl></CardContent></Card><Card><CardHeader><CardTitle>{t("userBalances")}</CardTitle><CardDescription>{t("userBalancesBody")}</CardDescription></CardHeader><CardContent>{data.users.length ? <UserBalanceTable t={t} users={data.users} /> : <Empty><EmptyHeader><EmptyMedia variant="icon"><UsersRoundIcon /></EmptyMedia><EmptyTitle>{t("noUsers")}</EmptyTitle><EmptyDescription>{t("userBalancesBody")}</EmptyDescription></EmptyHeader></Empty>}</CardContent></Card></section>
+}
+
+function UserBalanceTable({ t, users }: { t: Translate; users: AdminUserBalance[] }) {
+  return <><div className="flex flex-col sm:hidden">{users.map((user, index) => <div key={user.user_id}><div className="flex items-start justify-between gap-3 py-3"><div className="min-w-0"><span className="text-sm text-muted-foreground">{t("user")}</span><code className="block max-w-56 truncate text-xs">{user.user_id}</code><span className="text-muted-foreground text-xs">{formatTime(user.created_at)}</span></div><span className="font-medium tabular-nums">${formatUsd(user.available_usd)}</span></div>{index < users.length - 1 ? <Separator /> : null}</div>)}</div><div className="hidden sm:block"><Table><TableHeader><TableRow><TableHead>{t("user")}</TableHead><TableHead>{t("time")}</TableHead><TableHead className="text-right">{t("balance")}</TableHead></TableRow></TableHeader><TableBody>{users.map((user) => <TableRow key={user.user_id}><TableCell><code className="block max-w-96 truncate text-xs">{user.user_id}</code></TableCell><TableCell className="text-muted-foreground">{formatTime(user.created_at)}</TableCell><TableCell className="text-right font-medium tabular-nums">${formatUsd(user.available_usd)}</TableCell></TableRow>)}</TableBody></Table></div></>
+}
+
+function AdminLedgerPage({ t }: { t: Translate }) {
+  const api = useApi()
+  const [kind, setKind] = useState("")
+  const [status, setStatus] = useState("")
+  const [draftUserId, setDraftUserId] = useState("")
+  const [userId, setUserId] = useState("")
+  const [offset, setOffset] = useState(0)
+  const query = useMemo(() => { const parameters = new URLSearchParams({ limit: "50", offset: String(offset) }); if (kind) parameters.set("kind", kind); if (status) parameters.set("status", status); if (userId) parameters.set("user_id", userId); return parameters.toString() }, [kind, offset, status, userId])
+  const ledger = useQuery({ queryKey: ["admin-ledger", query], queryFn: () => api<AdminLedgerPage>(`/api/admin/ledger?${query}`) })
+  const data = ledger.data
+  const applyFilters = (event: FormEvent) => { event.preventDefault(); setUserId(draftUserId.trim()); setOffset(0) }
+  const updateKind = (value: string | null) => { setKind(value ?? ""); setOffset(0) }
+  const updateStatus = (value: string | null) => { setStatus(value ?? ""); setOffset(0) }
+  if (ledger.isLoading) return <LoadingScreen t={t} />
+  if (ledger.error) return <RequestError t={t} error={ledger.error} />
+  if (!data) return null
+  const kindItems = [{ value: "all", label: t("allKinds") }, { value: "deposit", label: t("deposit") }, { value: "withdrawal", label: t("withdraw") }, { value: "transfer_in", label: t("transferIn") }, { value: "transfer_out", label: t("transferOut") }, { value: "adjustment", label: t("adjustment") }]
+  const statusItems = [{ value: "all", label: t("allStatuses") }, { value: "pending", label: t("pending") }, { value: "posted", label: t("posted") }, { value: "rejected", label: t("rejected") }, { value: "disabled", label: t("disabled") }]
+  const page = Math.floor(data.offset / data.limit) + 1
+  return <section className="flex flex-col gap-6"><AdminPageHeading t={t} title={t("globalLedgerTitle")} body={t("globalLedgerBody")} /><Card><CardContent className="pt-6"><form onSubmit={applyFilters}><FieldGroup className="grid gap-3 sm:grid-cols-4"><Field><FieldLabel>{t("action")}</FieldLabel><Select items={kindItems} value={kind || "all"} onValueChange={(value) => updateKind(value === "all" ? null : value)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{kindItems.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectGroup></SelectContent></Select></Field><Field><FieldLabel>{t("status")}</FieldLabel><Select items={statusItems} value={status || "all"} onValueChange={(value) => updateStatus(value === "all" ? null : value)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{statusItems.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectGroup></SelectContent></Select></Field><Field><FieldLabel htmlFor="ledger-user-id">{t("userIdFilter")}</FieldLabel><Input id="ledger-user-id" value={draftUserId} onChange={(event) => setDraftUserId(event.target.value)} placeholder={t("userIdFilterHint")} /></Field><Field className="self-end"><Button type="submit">{t("filter")}</Button></Field></FieldGroup></form></CardContent></Card><Card><CardHeader><CardTitle>{t("globalLedger")}</CardTitle><CardDescription>{t("totalEntries")}: {data.total}</CardDescription><CardAction><Button aria-label={t("refresh")} size="icon" variant="ghost" disabled={ledger.isFetching} onClick={() => void ledger.refetch()}><RefreshCwIcon /></Button></CardAction></CardHeader><CardContent>{data.entries.length ? <AdminLedgerTable t={t} entries={data.entries} /> : <Empty><EmptyHeader><EmptyMedia variant="icon"><ScrollTextIcon /></EmptyMedia><EmptyTitle>{t("noLedgerEntries")}</EmptyTitle><EmptyDescription>{t("globalLedgerBody")}</EmptyDescription></EmptyHeader></Empty>}</CardContent>{data.total > data.limit ? <CardFooter className="justify-between"><span className="text-sm text-muted-foreground">{t("page")} {page}</span><div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={data.offset === 0} onClick={() => setOffset(Math.max(0, data.offset - data.limit))}><ChevronLeftIcon data-icon="inline-start" />{t("previous")}</Button><Button size="sm" variant="outline" disabled={data.offset + data.limit >= data.total} onClick={() => setOffset(data.offset + data.limit)}>{t("next")}<ChevronRightIcon data-icon="inline-end" /></Button></div></CardFooter> : null}</Card></section>
+}
+
+function AdminLedgerTable({ t, entries }: { t: Translate; entries: AdminLedgerEntry[] }) {
+  return <><div className="flex flex-col sm:hidden">{entries.map((entry, index) => <div key={entry.id}><div className="flex items-start justify-between gap-3 py-3"><div className="min-w-0 flex-1"><span className="text-sm text-muted-foreground">{t("user")}</span><code className="block max-w-56 truncate text-xs">{entry.user_id}</code><div className="mt-1 flex flex-wrap items-center gap-2"><span className="font-medium capitalize">{ledgerActionLabel(entry.kind, t)}</span><StatusBadge t={t} status={entry.status} /></div><ChainTransactionDetails entry={entry} t={t} /><span className="mt-1 text-muted-foreground text-xs">{formatTime(entry.created_at)}</span></div><span className="shrink-0 font-medium tabular-nums">{entry.balance_delta_usd_micros < 0 ? "−" : "+"}${formatMicros(Math.abs(entry.balance_delta_usd_micros))}</span></div>{index < entries.length - 1 ? <Separator /> : null}</div>)}</div><div className="hidden sm:block"><Table><TableHeader><TableRow><TableHead>{t("user")}</TableHead><TableHead>{t("action")}</TableHead><TableHead>{t("blockchain")}</TableHead><TableHead>{t("status")}</TableHead><TableHead className="text-right">{t("amount")}</TableHead><TableHead>{t("time")}</TableHead></TableRow></TableHeader><TableBody>{entries.map((entry) => <TableRow key={entry.id}><TableCell><code className="block max-w-40 truncate text-xs">{entry.user_id}</code></TableCell><TableCell><div className="flex flex-col gap-1"><span className="font-medium capitalize">{ledgerActionLabel(entry.kind, t)}</span><span className="max-w-32 truncate text-muted-foreground text-xs">{entry.note ?? entry.external_reference ?? entry.id}</span></div></TableCell><TableCell><ChainTransactionDetails entry={entry} t={t} /></TableCell><TableCell><StatusBadge t={t} status={entry.status} /></TableCell><TableCell className="text-right font-medium tabular-nums">{entry.balance_delta_usd_micros < 0 ? "−" : "+"}${formatMicros(Math.abs(entry.balance_delta_usd_micros))}</TableCell><TableCell className="text-muted-foreground">{formatTime(entry.created_at)}</TableCell></TableRow>)}</TableBody></Table></div></>
+}
+
+function AdminPageHeading({ t, title, body }: { t: Translate; title: string; body: string }) {
+  return <div><p className="text-sm text-muted-foreground">{t("administration")}</p><h1 className="text-2xl font-semibold tracking-tight">{title}</h1><p className="mt-1 max-w-3xl text-sm text-muted-foreground">{body}</p></div>
 }
 
 function SweepHistoryTable({ t, entries, onRetry }: { t: Translate; entries: AdminDeposit[]; onRetry: (entry: AdminDeposit) => void }) {
@@ -313,14 +388,18 @@ function AddressBookRow({ entry, t }: { entry: AddressBookEntry; t: Translate })
   return <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2">{editing ? <form onSubmit={(event) => { event.preventDefault(); rename.mutate() }}><FieldGroup className="flex-row items-center gap-2"><Field><FieldLabel className="sr-only" htmlFor={`address-book-label-${entry.id}`}>{t("addressLabel")}</FieldLabel><Input id={`address-book-label-${entry.id}`} value={label} onChange={(event) => setLabel(event.target.value)} maxLength={80} /></Field><Button size="sm" type="submit" disabled={rename.isPending || !label.trim()}>{t("saveAddress")}</Button><Button size="sm" type="button" variant="ghost" onClick={() => { setLabel(entry.label); setEditing(false) }}>{t("cancel")}</Button></FieldGroup></form> : <><span className="font-medium">{entry.label}</span><Badge variant="outline">{entry.chain_name}</Badge></>}</div><code className="block max-w-72 truncate text-xs text-muted-foreground">{entry.address}</code></div>{!editing ? <div className="flex items-center gap-1"><Button size="sm" variant="ghost" onClick={() => setEditing(true)}>{t("renameAddress")}</Button><Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate()}>{t("removeAddress")}</Button></div> : null}</div>
 }
 
-function DesktopNavigation({ currentPath, t }: { currentPath: string; t: Translate }) {
-  const item = (path: string, label: string) => <Button key={path} size="sm" variant={currentPath === path ? "secondary" : "ghost"} render={<Link to={path} />} nativeButton={false}>{label}</Button>
-  return <nav aria-label="Primary" className="hidden items-center gap-1 lg:flex">{item("/", t("home"))}{item("/activity", t("activity"))}{item("/settings", t("settings"))}</nav>
+function NavigationDrawer({ currentPath, t, root, open, setOpen }: { currentPath: string; t: Translate; root: boolean; open: boolean; setOpen: (open: boolean) => void }) {
+  const item = (path: string, label: string, icon: React.ReactNode) => <Button key={path} variant={currentPath === path ? "secondary" : "ghost"} className="w-full justify-start" render={<Link to={path} />} nativeButton={false} onClick={() => setOpen(false)}>{icon}{label}</Button>
+  return <Drawer open={open} onOpenChange={setOpen} swipeDirection="left"><DrawerContent><DrawerHeader><DrawerTitle>{t("appName")}</DrawerTitle><DrawerDescription>{t("usdOnly")}</DrawerDescription></DrawerHeader><div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-4"><NavigationGroup label={t("account")}>{item("/", t("home"), <WalletCardsIcon data-icon="inline-start" />)}{item("/activity", t("activity"), <HistoryIcon data-icon="inline-start" />)}{item("/settings", t("settings"), <SettingsIcon data-icon="inline-start" />)}</NavigationGroup>{root ? <NavigationGroup label={t("administration")}>{item("/admin/custody", t("custody"), <ShieldCheckIcon data-icon="inline-start" />)}{item("/admin/collections", t("collectionOperations"), <LandmarkIcon data-icon="inline-start" />)}{item("/admin/balances", t("userBalances"), <UsersRoundIcon data-icon="inline-start" />)}{item("/admin/ledger", t("globalLedger"), <ScrollTextIcon data-icon="inline-start" />)}</NavigationGroup> : null}</div></DrawerContent></Drawer>
 }
 
-function Navigation({ currentPath, t }: { currentPath: string; t: Translate }) {
-  const item = (path: string, label: string, icon: React.ReactNode) => <Button key={path} size="sm" variant={currentPath === path ? "secondary" : "ghost"} render={<Link to={path} />} nativeButton={false}>{icon}{label}</Button>
-  return <nav aria-label="Primary" className="fixed inset-x-0 bottom-0 bg-background lg:hidden"><Separator /><div className="mx-auto flex max-w-5xl items-center justify-around gap-1 px-3 py-2">{item("/", t("home"), <WalletCardsIcon data-icon="inline-start" />)}{item("/activity", t("activity"), <HistoryIcon data-icon="inline-start" />)}{item("/settings", t("settings"), <SettingsIcon data-icon="inline-start" />)}</div></nav>
+function NavigationGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return <section className="flex flex-col gap-1"><h2 className="px-2 text-xs font-medium text-muted-foreground">{label}</h2><nav aria-label={label} className="flex flex-col gap-1">{children}</nav></section>
+}
+
+function AdminRoute({ root, t, children }: { root: boolean; t: Translate; children: React.ReactNode }) {
+  if (root) return children
+  return <section className="flex flex-col gap-6"><div><p className="text-sm text-muted-foreground">{t("administration")}</p><h1 className="text-2xl font-semibold tracking-tight">{t("rootOnly")}</h1></div><Alert><ShieldCheckIcon /><AlertTitle>{t("rootOnly")}</AlertTitle><AlertDescription>{t("security")}</AlertDescription></Alert></section>
 }
 
 function LanguageMenu({ language, setLanguage, t }: { language: Language; setLanguage: (language: Language) => void; t: Translate }) {
@@ -330,7 +409,10 @@ function LanguageMenu({ language, setLanguage, t }: { language: Language; setLan
 function SweepStatusBadge({ t, status }: { t: Translate; status: string }) { const label = status === "queued" ? t("collectionQueued") : status === "awaiting_configuration" ? t("collectionAwaitingConfiguration") : status === "submitted" ? t("collectionSubmitted") : status === "failed" ? t("collectionFailed") : status === "swept" ? t("collectionSwept") : status.replace("_", " "); return <Badge variant={status === "failed" ? "destructive" : status === "swept" ? "secondary" : "outline"}>{label}</Badge> }
 function canRetrySweep(status: string) { return status === "queued" || status === "awaiting_configuration" || status === "failed" }
 function formatTime(value: string) { return new Date(value).toLocaleString() }
-function StatusBadge({ status }: { status: string }) { return <Badge variant={status === "failed" || status === "rejected" ? "destructive" : status === "completed" || status === "posted" ? "secondary" : "outline"}>{status.replace("_", " ")}</Badge> }
+function shortTransactionHash(value: string) { return `${value.slice(0, 10)}…${value.slice(-8)}` }
+function transactionExplorerUrl(chainId: number | null, transactionHash: string | null) { if (!chainId || !transactionHash) return null; const explorers: Record<number, string> = { 1: "https://etherscan.io", 10: "https://optimistic.etherscan.io", 56: "https://bscscan.com", 137: "https://polygonscan.com", 8453: "https://basescan.org", 42161: "https://arbiscan.io" }; const explorer = explorers[chainId]; return explorer ? `${explorer}/tx/${transactionHash}` : null }
+function ledgerActionLabel(kind: string, t: Translate) { return kind === "deposit" ? t("deposit") : kind === "withdrawal" ? t("withdraw") : kind === "transfer_in" ? t("transferIn") : kind === "transfer_out" ? t("transferOut") : kind === "adjustment" ? t("adjustment") : kind.replace("_", " ") }
+function StatusBadge({ t, status }: { t: Translate; status: string }) { const label = status === "pending" ? t("pending") : status === "posted" ? t("posted") : status === "rejected" ? t("rejected") : status === "disabled" ? t("disabled") : status === "awaiting_signer" ? t("awaitingSigner") : status === "submitted" ? t("submitted") : status === "completed" ? t("completed") : status === "failed" ? t("failed") : status; return <Badge variant={status === "failed" || status === "rejected" ? "destructive" : status === "completed" || status === "posted" ? "secondary" : "outline"}>{label}</Badge> }
 function LoadingScreen({ t }: { t: Translate }) { return <div className="flex flex-col gap-4"><Skeleton className="h-8 w-40" /><Skeleton className="h-36 w-full" /><p className="text-muted-foreground">{t("loading")}</p></div> }
 function RequestError({ t, error }: { t: Translate; error?: unknown }) { return <Alert variant="destructive"><AlertTitle>{t("requestFailed")}</AlertTitle><AlertDescription>{apiErrorDescription(error, t)}</AlertDescription></Alert> }
 
