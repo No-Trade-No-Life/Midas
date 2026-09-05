@@ -13,6 +13,7 @@
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary with automatic redirect to sign-in; Midas has no unauthenticated home page.
 - A scannable QR code for the dedicated deposit address.
 - Linkit React Components, including `LinkitAppHeaderUser` and `LinkitUserPicker` for username-based transfer recipients.
+- A root-only administration area for custody configuration, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. A destination can be saved and labelled from its withdrawal history afterward.
 - OpenAPI contract and CI foundation.
 
