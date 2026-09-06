@@ -3,7 +3,7 @@ import { createPortal } from "react-dom"
 import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider, type UseQueryResult, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { AuthMiniProvider, useAuthMini } from "auth-mini-react-components"
-import { LinkitAppHeaderUser, LinkitProvider, LinkitUserInfo, LinkitUserPicker } from "linkit-react-components"
+import { LinkitMyInfo, LinkitProvider, LinkitUserInfo, LinkitUserPicker } from "linkit-react-components"
 import { ThemeProvider } from "next-themes"
 import { QRCodeSVG } from "qrcode.react"
 import { HashRouter, Link, Route, Routes, useLocation } from "react-router-dom"
@@ -170,7 +170,7 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
         <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button><Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><LandmarkIcon aria-hidden="true" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
         <div className="flex shrink-0 items-center gap-1">
           <LanguageMenu language={language} setLanguage={setLanguage} t={t} />
-          <LinkitAppHeaderUser className="inline-flex max-w-24 min-w-0 shrink-0 items-center gap-2 overflow-hidden whitespace-nowrap sm:max-w-44 [&>.linkit-app-header-user__name]:truncate" lang={language === "zh" ? "zh-CN" : "en"} />
+          <LinkitMyInfo />
         </div>
       </div>
     </header>
