@@ -93,7 +93,7 @@ POST /api/agreements/{id}/api-key
 ```
 
 An external payment channel charges with `POST /api/agreements/{id}/charges`, an
-`X-Api-Key` issued at channel creation, and an `Idempotency-Key`. It supplies
+`X-Api-Key` issued by owner-only rotation, and an `Idempotency-Key`. It supplies
 the already-authorized `user_id` and exact `amount_usd_micros`; Midas rejects
 unbound users and insufficient available balances without changing either
 ledger.
