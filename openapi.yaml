@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Midas API
-  version: 0.6.0
+  version: 0.7.0
   description: >-
     USD-denominated payment ledger for built-in EVM USDC and USDT on Ethereum,
     BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. Midas scans
@@ -54,7 +54,7 @@ paths:
       responses: { '200': { description: Assets } }
   /balances/me:
     get:
-      summary: Current caller's available USD balance, in exact micro-dollars
+      summary: Current caller's available USD balance, in exact nanodollars
       responses: { '200': { description: Balance, content: { application/json: { schema: { $ref: '#/components/schemas/Balance' } } } } }
   /ledger/me:
     get:
@@ -340,20 +340,20 @@ components:
   schemas:
     Balance:
       type: object
-      required: [currency, available_usd_micros, available_usd]
+      required: [currency, available_usd_nanos, available_usd]
       properties:
         currency: { const: USD }
-        available_usd_micros: { type: integer, format: int64, description: Exact USD micro-dollars }
+        available_usd_nanos: { type: integer, format: int64, description: Exact USD nanodollars }
         available_usd: { type: string, example: '12.500000' }
     LedgerEntry:
       type: object
-      required: [id, kind, status, amount_usd_micros, balance_delta_usd_micros, created_at]
+      required: [id, kind, status, amount_usd_nanos, balance_delta_usd_nanos, created_at]
       properties:
         id: { type: string, format: uuid }
         kind: { type: string, enum: [deposit, withdrawal, transfer_in, transfer_out, adjustment] }
         status: { type: string, enum: [pending, posted, rejected, disabled] }
-        amount_usd_micros: { type: integer, format: int64 }
-        balance_delta_usd_micros: { type: integer, format: int64 }
+        amount_usd_nanos: { type: integer, format: int64 }
+        balance_delta_usd_nanos: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         posted_at: { type: [string, 'null'], format: date-time }
         asset_symbol: { type: [string, 'null'], enum: [USDC, USDT, null] }
@@ -364,11 +364,11 @@ components:
         note: { type: [string, 'null'] }
     AdminUserBalance:
       type: object
-      required: [user_id, created_at, available_usd_micros, available_usd]
+      required: [user_id, created_at, available_usd_nanos, available_usd]
       properties:
         user_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
-        available_usd_micros: { type: integer, format: int64 }
+        available_usd_nanos: { type: integer, format: int64 }
         available_usd: { type: string }
     AdminBalancesResponse:
       type: object
@@ -376,11 +376,11 @@ components:
       properties:
         summary:
           type: object
-          required: [user_count, funded_user_count, total_available_usd_micros, total_available_usd]
+          required: [user_count, funded_user_count, total_available_usd_nanos, total_available_usd]
           properties:
             user_count: { type: integer }
             funded_user_count: { type: integer }
-            total_available_usd_micros: { type: integer, format: int64 }
+            total_available_usd_nanos: { type: integer, format: int64 }
             total_available_usd: { type: string }
         users:
           type: array
@@ -417,27 +417,27 @@ components:
         transaction_hash: { type: string, pattern: '^0x[a-fA-F0-9]{64}$' }
     TransferRequest:
       type: object
-      required: [recipient_user_id, amount_usd_micros]
+      required: [recipient_user_id, amount_usd_nanos]
       properties:
         recipient_user_id: { type: string, format: uuid }
-        amount_usd_micros: { type: integer, format: int64, minimum: 1 }
+        amount_usd_nanos: { type: integer, format: int64, minimum: 1 }
         note: { type: string, maxLength: 280 }
     WithdrawalRequest:
       type: object
-      required: [asset_id, destination_address, amount_usd_micros]
+      required: [asset_id, destination_address, amount_usd_nanos]
       properties:
         asset_id: { type: string }
         destination_address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$', description: Direct EVM destination. The asset determines its chain. }
-        amount_usd_micros: { type: integer, format: int64, minimum: 1 }
+        amount_usd_nanos: { type: integer, format: int64, minimum: 1 }
         note: { type: string, maxLength: 280 }
     WithdrawalResponse:
       type: object
-      required: [id, asset_symbol, destination_address, amount_usd_micros, amount_usd, status]
+      required: [id, asset_symbol, destination_address, amount_usd_nanos, amount_usd, status]
       properties:
         id: { type: string, format: uuid }
         asset_symbol: { type: string, enum: [USDC, USDT] }
         destination_address: { type: string, pattern: '^0x[a-fA-F0-9]{40}$' }
-        amount_usd_micros: { type: integer, format: int64 }
+        amount_usd_nanos: { type: integer, format: int64 }
         amount_usd: { type: string }
         transaction_hash: { type: [string, 'null'], pattern: '^0x[a-fA-F0-9]{64}$' }
         status: { type: string, enum: [awaiting_signer, submitted, completed, failed] }
@@ -507,19 +507,19 @@ components:
         created_at: { type: string, format: date-time }
     PaymentAgreementChargeInput:
       type: object
-      required: [user_id, amount_usd_micros]
+      required: [user_id, amount_usd_nanos]
       properties:
         user_id: { type: string, format: uuid, description: User who already authorized this payment channel. }
-        amount_usd_micros: { type: integer, format: int64, minimum: 1, description: Exact USD micro-dollars to charge. }
+        amount_usd_nanos: { type: integer, format: int64, minimum: 1, description: Exact USD nanodollars to charge. }
     PaymentAgreementCharge:
       type: object
-      required: [id, agreement_id, payer_user_id, owner_user_id, amount_usd_micros, amount_usd, created_at]
+      required: [id, agreement_id, payer_user_id, owner_user_id, amount_usd_nanos, amount_usd, created_at]
       properties:
         id: { type: string, format: uuid }
         agreement_id: { type: string, format: uuid }
         payer_user_id: { type: string, format: uuid }
         owner_user_id: { type: string, format: uuid }
-        amount_usd_micros: { type: integer, format: int64 }
+        amount_usd_nanos: { type: integer, format: int64 }
         amount_usd: { type: string }
         created_at: { type: string, format: date-time }
     EvmConfigInput:
@@ -560,7 +560,7 @@ components:
           items: { $ref: '#/components/schemas/CustodyNetworkBalances' }
     AdminDeposit:
       type: object
-      required: [id, user_id, deposit_address, asset_symbol, chain_id, network_name, amount_usd_micros, amount_usd, transaction_hash, sweep_status, created_at, sweep_operation_status, sweep_updated_at]
+      required: [id, user_id, deposit_address, asset_symbol, chain_id, network_name, amount_usd_nanos, amount_usd, transaction_hash, sweep_status, created_at, sweep_operation_status, sweep_updated_at]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -568,7 +568,7 @@ components:
         asset_symbol: { type: string, enum: [USDC, USDT] }
         chain_id: { type: integer, enum: [1, 10, 56, 137, 8453, 42161] }
         network_name: { type: string }
-        amount_usd_micros: { type: integer, format: int64 }
+        amount_usd_nanos: { type: integer, format: int64 }
         amount_usd: { type: string }
         transaction_hash: { type: string, pattern: '^0x[a-fA-F0-9]{64}$' }
         sweep_status: { type: string, enum: [queued, awaiting_configuration, submitted, swept, failed] }
@@ -580,7 +580,7 @@ components:
         sweep_updated_at: { type: string, format: date-time }
     AdminWithdrawal:
       type: object
-      required: [id, user_id, destination_address, asset_symbol, chain_id, network_name, amount_usd_micros, amount_usd, status, created_at, retryable]
+      required: [id, user_id, destination_address, asset_symbol, chain_id, network_name, amount_usd_nanos, amount_usd, status, created_at, retryable]
       properties:
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
@@ -588,7 +588,7 @@ components:
         asset_symbol: { type: string, enum: [USDC, USDT] }
         chain_id: { type: integer, enum: [1, 10, 56, 137, 8453, 42161] }
         network_name: { type: string }
-        amount_usd_micros: { type: integer, format: int64 }
+        amount_usd_nanos: { type: integer, format: int64 }
         amount_usd: { type: string }
         transaction_hash: { type: [string, 'null'], pattern: '^0x[a-fA-F0-9]{64}$' }
         status: { type: string, enum: [awaiting_signer, submitted, completed, failed] }

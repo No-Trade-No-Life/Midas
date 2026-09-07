@@ -74,14 +74,14 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   kind TEXT NOT NULL CHECK (kind IN ('deposit', 'withdrawal', 'transfer_in', 'transfer_out', 'adjustment')),
   status TEXT NOT NULL CHECK (status IN ('pending', 'posted', 'rejected', 'disabled')),
   asset_id TEXT REFERENCES supported_assets(id),
-  amount_usd_micros INTEGER NOT NULL,
-  balance_delta_usd_micros INTEGER NOT NULL,
+  amount_usd_nanos INTEGER NOT NULL,
+  balance_delta_usd_nanos INTEGER NOT NULL,
   counterparty_user_id TEXT REFERENCES users(id),
   external_reference TEXT UNIQUE,
   note TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   posted_at TEXT,
-  CHECK (amount_usd_micros >= 0)
+  CHECK (amount_usd_nanos >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS ledger_entries_user_created_idx
@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS internal_transfers (
   id TEXT PRIMARY KEY,
   sender_user_id TEXT NOT NULL REFERENCES users(id),
   recipient_user_id TEXT NOT NULL REFERENCES users(id),
-  amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros > 0),
+  amount_usd_nanos INTEGER NOT NULL CHECK (amount_usd_nanos > 0),
   sender_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
   recipient_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -160,8 +160,8 @@ CREATE TABLE IF NOT EXISTS withdrawal_target_notes (
 );
 
 -- A payment agreement is a channel owned by one Midas user. The plaintext
--- API key is returned only at creation; the database keeps a one-way hash and
--- a non-secret prefix for identification.
+-- API key is returned only by explicit owner rotation; the database keeps a
+-- one-way hash and a non-secret prefix for identification.
 CREATE TABLE IF NOT EXISTS payment_agreements (
   id TEXT PRIMARY KEY,
   owner_user_id TEXT NOT NULL REFERENCES users(id),
@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS payment_agreement_charges (
   id TEXT PRIMARY KEY,
   agreement_id TEXT NOT NULL REFERENCES payment_agreements(id),
   payer_user_id TEXT NOT NULL REFERENCES users(id),
-  amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros > 0),
+  amount_usd_nanos INTEGER NOT NULL CHECK (amount_usd_nanos > 0),
   payer_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
   owner_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
   idempotency_key TEXT NOT NULL,
@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
   address_book_entry_id TEXT REFERENCES address_book_entries(id),
   destination_address TEXT NOT NULL,
-  amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros > 0),
+  amount_usd_nanos INTEGER NOT NULL CHECK (amount_usd_nanos > 0),
   transaction_hash TEXT,
   -- The signed raw transaction is persisted before it is sent to an RPC. It
   -- is never returned by an API, and lets an operator safely re-broadcast the

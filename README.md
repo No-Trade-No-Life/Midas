@@ -5,7 +5,7 @@
 ## What Midas includes
 
 - Rust/Axum API with SQLite **WAL** persistence.
-- Exact USD micro-ledger (`amount_usd_micros` / `balance_delta_usd_micros`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD micro-dollars.
+- Exact USD nanodollar ledger (`amount_usd_nanos` / `balance_delta_usd_nanos`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD nanodollars.
 - One persisted dedicated EVM-compatible deposit key/address per user, automatically created after initialization; private material is never returned from an API.
 - Automatic receipt-driven deposits: Midas scans a bounded RPC `Transfer`-log range for one deposit-address/network pair per second and persists its cursor. It verifies every candidate's ERC-20 receipt through the chain RPC, credits USD, and submits the gas-funding and source-wallet collection sequence. Customers can also submit a network and TxID to verify and claim a missed deposit; the token and amount are always derived from the receipt.
 - Atomic internal transfers that automatically provision a new recipient's Midas account and dedicated wallet, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
@@ -33,7 +33,9 @@ Axum API
 
 ## Data model
 
-Midas records **USD only** in integer micro-dollars. Future USDC/USDT chain metadata is retained alongside ledger entries, but no token amount is treated as the system-of-record balance.
+Midas records **USD only** in integer nanodollars. Future USDC/USDT chain metadata is retained alongside ledger entries, but no token amount is treated as the system-of-record balance.
+
+Existing SQLite databases migrate on the first startup that carries this version. The migration atomically renames every persisted `*_usd_micros` column, multiplies its historical values by 1,000, verifies that no value can overflow `i64`, and records the `nanodollars` unit marker so it cannot run twice.
 
 | Table | Purpose |
 | --- | --- |
@@ -94,7 +96,7 @@ POST /api/agreements/{id}/api-key
 
 An external payment channel charges with `POST /api/agreements/{id}/charges`, an
 `X-Api-Key` issued by owner-only rotation, and an `Idempotency-Key`. It supplies
-the already-authorized `user_id` and exact `amount_usd_micros`; Midas rejects
+the already-authorized `user_id` and exact `amount_usd_nanos`; Midas rejects
 unbound users and insufficient available balances without changing either
 ledger.
 
