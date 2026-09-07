@@ -239,6 +239,23 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementCharge' } } }
         '401': { description: Missing or invalid channel API key }
         '409': { description: User has not authorized this channel or has insufficient available USD }
+  /agreements/{id}/charges/summary:
+    post:
+      security: [ { agreementApiKey: [] } ]
+      summary: Read one to one hundred users' cumulative posted payments for this automatic-payment channel
+      parameters:
+        - { $ref: '#/components/parameters/AgreementApiKey' }
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentAgreementChargeSummaryInput' }
+      responses:
+        '200':
+          description: Per-user cumulative payments, scoped to the authenticated channel
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementChargeSummary' } } }
+        '401': { description: Missing or invalid channel API key }
   /admin/evm-config:
     get:
       summary: Root-only EVM configuration; never returns private key material
@@ -522,6 +539,33 @@ components:
         amount_usd_nanos: { type: integer, format: int64 }
         amount_usd: { type: string }
         created_at: { type: string, format: date-time }
+    PaymentAgreementChargeSummaryInput:
+      type: object
+      required: [user_ids]
+      properties:
+        user_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { type: string, format: uuid }
+    PaymentAgreementPayerSummary:
+      type: object
+      required: [user_id, bound, total_paid_usd_nanos, total_paid_usd, charge_count, last_charged_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        bound: { type: boolean }
+        total_paid_usd_nanos: { type: integer, format: int64 }
+        total_paid_usd: { type: string }
+        charge_count: { type: integer, format: int64 }
+        last_charged_at: { type: [string, 'null'], format: date-time }
+    PaymentAgreementChargeSummary:
+      type: object
+      required: [agreement_id, payers]
+      properties:
+        agreement_id: { type: string, format: uuid }
+        payers:
+          type: array
+          items: { $ref: '#/components/schemas/PaymentAgreementPayerSummary' }
     EvmConfigInput:
       type: object
       properties:
