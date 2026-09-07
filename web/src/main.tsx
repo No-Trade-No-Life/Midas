@@ -21,6 +21,8 @@ import {
   LandmarkIcon,
   LoaderCircleIcon,
   MenuIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
   RefreshCwIcon,
   RotateCcwIcon,
   ScrollTextIcon,
@@ -45,6 +47,7 @@ import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Toaster } from "@/components/ui/sonner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { cn } from "@/lib/utils"
 import "linkit-react-components/styles.css"
 import "./styles.css"
 
@@ -155,6 +158,7 @@ function GlobalToaster() {
 function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
   const [language, setLanguage] = useState<Language>(() => window.localStorage.getItem("midas-language") === "zh" ? "zh" : "en")
   const [navigationOpen, setNavigationOpen] = useState(false)
+  const [navigationCollapsed, setNavigationCollapsed] = useState(false)
   const t = (key: keyof typeof messages.en) => messages[language][key]
   const auth = useAuthMini()
   const location = useLocation()
@@ -164,10 +168,12 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
 
   useEffect(() => { window.localStorage.setItem("midas-language", language) }, [language])
 
-  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><div className="min-h-dvh bg-background">
+  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><div className={cn("min-h-dvh bg-background", auth.isAuthenticated && "lg:grid", auth.isAuthenticated && (navigationCollapsed ? "lg:grid-cols-[3rem_minmax(0,1fr)]" : "lg:grid-cols-[16rem_minmax(0,1fr)]"))}>
+    {auth.isAuthenticated && <DesktopNavigation collapsed={navigationCollapsed} root={root} t={t} />}
+    <div className="min-w-0">
     <header className="sticky top-0 border-b bg-background">
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-        <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button><Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><LandmarkIcon aria-hidden="true" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
+        <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} className="lg:hidden" size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button>{auth.isAuthenticated && <Button aria-label={navigationCollapsed ? t("menu") : t("appName")} className="hidden lg:inline-flex" size="icon" variant="ghost" onClick={() => setNavigationCollapsed(value => !value)}>{navigationCollapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}</Button>}<Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><LandmarkIcon aria-hidden="true" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
         <div className="flex shrink-0 items-center gap-1">
           <LanguageMenu language={language} setLanguage={setLanguage} t={t} />
           <LinkitMyInfo />
@@ -193,7 +199,29 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
       </Routes>
     </main>
     {auth.isAuthenticated && <NavigationDrawer currentPath={location.pathname} t={t} root={root} open={navigationOpen} setOpen={setNavigationOpen} />}
+    </div>
   </div></LinkitProvider>
+}
+
+function DesktopNavigation({ collapsed, root, t }: { collapsed: boolean; root: boolean; t: Translate }) {
+  const location = useLocation()
+  const item = (path: string, label: string, icon: React.ReactNode) => <Button key={path} aria-label={collapsed ? label : undefined} className={cn("w-full justify-start", collapsed && "justify-center px-0")} title={collapsed ? label : undefined} variant={location.pathname === path ? "secondary" : "ghost"} render={<Link to={path} />} nativeButton={false}>{icon}{!collapsed && <span className="truncate">{label}</span>}</Button>
+  return <aside className="sticky top-0 hidden h-svh min-h-0 flex-col border-r bg-muted/30 lg:flex" data-collapsed={collapsed}>
+    <div className="flex min-h-0 flex-1 flex-col gap-5 p-3">
+      <div className={cn("flex items-center gap-2", collapsed && "justify-center")}>
+        <Link to="/" className="flex min-w-0 items-center gap-2 rounded-md p-1 font-semibold focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"><div className="grid size-7 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><LandmarkIcon /></div>{!collapsed && <span className="truncate">{t("appName")}</span>}</Link>
+      </div>
+      <nav aria-label={t("menu")} className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
+        <NavigationSection collapsed={collapsed} label={t("account")}>{item("/", t("home"), <WalletCardsIcon data-icon="inline-start" />)}{item("/activity", t("activity"), <HistoryIcon data-icon="inline-start" />)}{item("/withdrawal-address-book", t("withdrawalAddressBook"), <ArrowUpFromLineIcon data-icon="inline-start" />)}{item("/automatic-receipts", t("automaticReceipts"), <ArrowDownToLineIcon data-icon="inline-start" />)}{item("/automatic-payments", t("automaticPayments"), <ArrowLeftRightIcon data-icon="inline-start" />)}</NavigationSection>
+        <NavigationSection collapsed={collapsed} label={t("settings")}>{item("/settings", t("settings"), <SettingsIcon data-icon="inline-start" />)}</NavigationSection>
+        {root && <NavigationSection collapsed={collapsed} label={t("administration")}>{item("/admin/custody", t("custody"), <ShieldCheckIcon data-icon="inline-start" />)}{item("/admin/deposit-discovery", t("depositDiscovery"), <SearchIcon data-icon="inline-start" />)}{item("/admin/collections", t("collectionOperations"), <LandmarkIcon data-icon="inline-start" />)}{item("/admin/withdrawals", t("withdrawalOperations"), <ArrowUpFromLineIcon data-icon="inline-start" />)}{item("/admin/balances", t("userBalances"), <UsersRoundIcon data-icon="inline-start" />)}{item("/admin/ledger", t("globalLedger"), <ScrollTextIcon data-icon="inline-start" />)}</NavigationSection>}
+      </nav>
+    </div>
+  </aside>
+}
+
+function NavigationSection({ collapsed, label, children }: { collapsed: boolean; label: string; children: React.ReactNode }) {
+  return <section className="flex flex-col gap-1">{!collapsed && <h2 className="px-2 text-xs font-medium text-muted-foreground">{label}</h2>}{children}</section>
 }
 
 function Dashboard({ t, language }: { t: Translate; language: Language }) {
