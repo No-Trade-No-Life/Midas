@@ -694,6 +694,11 @@ struct PaymentAgreementChargeInput {
     amount_usd_nanos: i64,
 }
 
+#[derive(Deserialize)]
+struct PaymentAgreementChargeSummaryInput {
+    user_ids: Vec<String>,
+}
+
 #[derive(Serialize, Debug)]
 struct PaymentAgreementCharge {
     id: String,
@@ -703,6 +708,22 @@ struct PaymentAgreementCharge {
     amount_usd_nanos: i64,
     amount_usd: String,
     created_at: String,
+}
+
+#[derive(Serialize)]
+struct PaymentAgreementChargeSummary {
+    agreement_id: String,
+    payers: Vec<PaymentAgreementPayerSummary>,
+}
+
+#[derive(Serialize)]
+struct PaymentAgreementPayerSummary {
+    user_id: String,
+    bound: bool,
+    total_paid_usd_nanos: i64,
+    total_paid_usd: String,
+    charge_count: i64,
+    last_charged_at: Option<String>,
 }
 
 struct LedgerInsert<'a> {
@@ -814,6 +835,10 @@ fn app(state: AppState) -> Router {
         .route(
             "/agreements/:id/api-key",
             post(rotate_payment_agreement_api_key),
+        )
+        .route(
+            "/agreements/:id/charges/summary",
+            post(payment_agreement_charge_summary),
         )
         .route("/agreements/:id/charges", post(charge_payment_agreement))
         .route(
@@ -1853,6 +1878,22 @@ async fn charge_payment_agreement(
     ))
 }
 
+async fn payment_agreement_charge_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<PaymentAgreementChargeSummaryInput>,
+) -> Result<Json<PaymentAgreementChargeSummary>, ApiError> {
+    let api_key = payment_agreement_api_key(&headers)?;
+    let agreement = read_payment_agreement_for_api_key(&state.db, &id, api_key).await?;
+    let user_ids = payment_agreement_summary_user_ids(input.user_ids)?;
+    let payers = payment_agreement_payer_summaries(&state.db, &agreement.id, &user_ids).await?;
+    Ok(Json(PaymentAgreementChargeSummary {
+        agreement_id: agreement.id,
+        payers,
+    }))
+}
+
 async fn post_payment_agreement_charge(
     db: &SqlitePool,
     agreement: &PaymentAgreement,
@@ -1943,6 +1984,53 @@ async fn post_payment_agreement_charge(
         .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
     read_payment_agreement_charge(db, &charge_id).await
+}
+
+fn payment_agreement_summary_user_ids(values: Vec<String>) -> Result<Vec<String>, ApiError> {
+    if values.is_empty() || values.len() > 100 {
+        return Err(ApiError::invalid(
+            "user_ids must contain 1 to 100 Auth Mini UUIDs",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut user_ids = Vec::with_capacity(values.len());
+    for value in values {
+        let user_id = value.trim();
+        Uuid::parse_str(user_id)
+            .map_err(|_| ApiError::invalid("user_ids must contain Auth Mini UUIDs"))?;
+        if seen.insert(user_id.to_owned()) {
+            user_ids.push(user_id.to_owned());
+        }
+    }
+    Ok(user_ids)
+}
+
+async fn payment_agreement_payer_summaries(
+    db: &SqlitePool,
+    agreement_id: &str,
+    user_ids: &[String],
+) -> Result<Vec<PaymentAgreementPayerSummary>, ApiError> {
+    let mut summaries = Vec::with_capacity(user_ids.len());
+    for user_id in user_ids {
+        let row = sqlx::query(
+            "SELECT EXISTS(SELECT 1 FROM payment_agreement_bindings WHERE agreement_id=?1 AND user_id=?2),COALESCE(SUM(amount_usd_nanos),0),COUNT(*),MAX(created_at) FROM payment_agreement_charges WHERE agreement_id=?1 AND payer_user_id=?2",
+        )
+        .bind(agreement_id)
+        .bind(user_id)
+        .fetch_one(db)
+        .await
+        .map_err(db_error)?;
+        let total_paid_usd_nanos: i64 = row.get(1);
+        summaries.push(PaymentAgreementPayerSummary {
+            user_id: user_id.clone(),
+            bound: row.get::<i64, _>(0) != 0,
+            total_paid_usd_nanos,
+            total_paid_usd: format_usd(total_paid_usd_nanos),
+            charge_count: row.get(2),
+            last_charged_at: row.get(3),
+        });
+    }
+    Ok(summaries)
 }
 
 fn payment_agreement_name(value: &str) -> Result<String, ApiError> {
@@ -5368,6 +5456,27 @@ mod tests {
             .unwrap(),
             2
         );
+        let unbound_user_id = Uuid::new_v4().to_string();
+        let summaries = payment_agreement_payer_summaries(
+            &db,
+            &agreement.id,
+            &[payer_user_id.clone(), unbound_user_id.clone()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].user_id, payer_user_id);
+        assert!(summaries[0].bound);
+        assert_eq!(summaries[0].total_paid_usd_nanos, 750_000);
+        assert_eq!(summaries[0].charge_count, 1);
+        assert!(summaries[0].last_charged_at.is_some());
+        assert_eq!(summaries[1].user_id, unbound_user_id);
+        assert!(!summaries[1].bound);
+        assert_eq!(summaries[1].total_paid_usd_nanos, 0);
+        assert_eq!(summaries[1].charge_count, 0);
+        assert!(summaries[1].last_charged_at.is_none());
+        assert!(payment_agreement_summary_user_ids(Vec::new()).is_err());
+        assert!(payment_agreement_summary_user_ids(vec!["not-a-uuid".to_owned()]).is_err());
         sqlx::query("DELETE FROM payment_agreement_bindings WHERE agreement_id=?1 AND user_id=?2")
             .bind(&agreement.id)
             .bind(&payer_user_id)
