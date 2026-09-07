@@ -45,6 +45,11 @@ abigen!(
 const AUTH_MINI_BASE_URL: &str = "https://auth.ntnl.io";
 const AUTH_MINI_AUDIENCE: &str = "midas.ntnl.io";
 const ROOT_USER_ID_KEY: &str = "root_user_id";
+const USD_LEDGER_UNIT_KEY: &str = "usd_ledger_unit";
+const USD_LEDGER_UNIT_NANODOLLARS: &str = "nanodollars";
+const USD_NANOS_PER_MICRO: i64 = 1_000;
+const MAX_LEGACY_MICROS_FOR_NANO_MIGRATION: i64 = i64::MAX / USD_NANOS_PER_MICRO;
+const MIN_LEGACY_MICROS_FOR_NANO_MIGRATION: i64 = i64::MIN / USD_NANOS_PER_MICRO;
 const CUSTODY_WALLET_ADDRESS_KEY: &str = "evm_custody_wallet_address";
 const CUSTODY_WALLET_PRIVATE_KEY_KEY: &str = "evm_custody_wallet_private_key";
 const LEGACY_GAS_ACCOUNT_PRIVATE_KEY_KEY: &str = "evm_gas_account_private_key";
@@ -60,6 +65,25 @@ const RPC_DISCOVERY_BLOCK_RANGE: i64 = 50;
 const RPC_DISCOVERY_CONFIRMATION_BLOCKS: i64 = 2;
 const ETHEREUM_DISCOVERY_RPC_URL: &str = "https://rpc.mevblocker.io";
 const BSC_DISCOVERY_RPC_URL: &str = "https://bsc-rpc.publicnode.com";
+const USD_LEDGER_COLUMNS: [(&str, &str, &str); 5] = [
+    ("ledger_entries", "amount_usd_micros", "amount_usd_nanos"),
+    (
+        "ledger_entries",
+        "balance_delta_usd_micros",
+        "balance_delta_usd_nanos",
+    ),
+    (
+        "internal_transfers",
+        "amount_usd_micros",
+        "amount_usd_nanos",
+    ),
+    (
+        "payment_agreement_charges",
+        "amount_usd_micros",
+        "amount_usd_nanos",
+    ),
+    ("withdrawals", "amount_usd_micros", "amount_usd_nanos"),
+];
 
 #[derive(Clone, Copy)]
 struct BuiltinEvmNetwork {
@@ -286,7 +310,7 @@ struct SetupRequest {
 #[derive(Serialize)]
 struct Balance {
     currency: &'static str,
-    available_usd_micros: i64,
+    available_usd_nanos: i64,
     available_usd: String,
 }
 
@@ -295,8 +319,8 @@ struct LedgerEntry {
     id: String,
     kind: String,
     status: String,
-    amount_usd_micros: i64,
-    balance_delta_usd_micros: i64,
+    amount_usd_nanos: i64,
+    balance_delta_usd_nanos: i64,
     created_at: String,
     posted_at: Option<String>,
     asset_symbol: Option<String>,
@@ -389,7 +413,7 @@ struct DepositClaimRequest {
 #[derive(Serialize)]
 struct DepositResponse {
     id: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     amount_usd: String,
     asset_symbol: String,
     transaction_hash: String,
@@ -404,7 +428,7 @@ struct AdminDeposit {
     asset_symbol: String,
     chain_id: i64,
     network_name: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     amount_usd: String,
     transaction_hash: String,
     sweep_status: String,
@@ -424,7 +448,7 @@ struct AdminWithdrawal {
     asset_symbol: String,
     chain_id: i64,
     network_name: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     amount_usd: String,
     transaction_hash: Option<String>,
     status: String,
@@ -437,7 +461,7 @@ struct AdminWithdrawal {
 struct AdminBalanceSummary {
     user_count: i64,
     funded_user_count: i64,
-    total_available_usd_micros: i64,
+    total_available_usd_nanos: i64,
     total_available_usd: String,
 }
 
@@ -445,7 +469,7 @@ struct AdminBalanceSummary {
 struct AdminUserBalance {
     user_id: String,
     created_at: String,
-    available_usd_micros: i64,
+    available_usd_nanos: i64,
     available_usd: String,
 }
 
@@ -479,8 +503,8 @@ struct AdminLedgerEntry {
     counterparty_user_id: Option<String>,
     kind: String,
     status: String,
-    amount_usd_micros: i64,
-    balance_delta_usd_micros: i64,
+    amount_usd_nanos: i64,
+    balance_delta_usd_nanos: i64,
     created_at: String,
     posted_at: Option<String>,
     asset_symbol: Option<String>,
@@ -502,14 +526,14 @@ struct AdminLedgerPage {
 #[derive(Deserialize)]
 struct TransferRequest {
     recipient_user_id: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     note: Option<String>,
 }
 
 #[derive(Serialize)]
 struct TransferResponse {
     id: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     amount_usd: String,
     recipient_user_id: String,
     status: &'static str,
@@ -519,7 +543,7 @@ struct TransferResponse {
 struct WithdrawalRequest {
     asset_id: String,
     destination_address: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     note: Option<String>,
 }
 
@@ -530,7 +554,7 @@ struct WithdrawalResponse {
     destination_address: String,
     address_book_entry_id: Option<String>,
     destination_label: Option<String>,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     amount_usd: String,
     transaction_hash: Option<String>,
     status: String,
@@ -566,7 +590,7 @@ struct DiscoveredTransfer {
 }
 
 struct VerifiedDeposit {
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     raw_amount: String,
     transaction_hash: String,
     log_index: i64,
@@ -577,7 +601,7 @@ struct WithdrawalTarget {
     rpc_url: String,
     chain_id: i64,
     destination_address: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     token_decimals: u8,
     transaction_hash: Option<String>,
     signed_transaction: Option<String>,
@@ -667,7 +691,7 @@ struct PaymentAgreementBinding {
 #[derive(Deserialize)]
 struct PaymentAgreementChargeInput {
     user_id: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
 }
 
 #[derive(Serialize, Debug)]
@@ -676,7 +700,7 @@ struct PaymentAgreementCharge {
     agreement_id: String,
     payer_user_id: String,
     owner_user_id: String,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     amount_usd: String,
     created_at: String,
 }
@@ -687,8 +711,8 @@ struct LedgerInsert<'a> {
     kind: &'a str,
     status: &'a str,
     asset_id: Option<&'a str>,
-    amount_usd_micros: i64,
-    balance_delta_usd_micros: i64,
+    amount_usd_nanos: i64,
+    balance_delta_usd_nanos: i64,
     counterparty_user_id: Option<&'a str>,
     external_reference: Option<&'a str>,
     note: Option<&'a str>,
@@ -902,11 +926,11 @@ async fn my_balance(
     headers: HeaderMap,
 ) -> Result<Json<Balance>, ApiError> {
     let user_id = require_initialized_user(&state, &headers).await?;
-    let micros = available_balance(&state.db, &user_id).await?;
+    let nanos = available_balance(&state.db, &user_id).await?;
     Ok(Json(Balance {
         currency: "USD",
-        available_usd_micros: micros,
-        available_usd: format_usd(micros),
+        available_usd_nanos: nanos,
+        available_usd: format_usd(nanos),
     }))
 }
 
@@ -919,7 +943,7 @@ async fn my_ledger(
 }
 
 async fn load_user_ledger(db: &SqlitePool, user_id: &str) -> Result<Vec<LedgerEntry>, ApiError> {
-    let rows = sqlx::query("SELECT e.id,e.kind,e.status,e.amount_usd_micros,e.balance_delta_usd_micros,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE e.user_id=?1 ORDER BY e.created_at DESC,e.id DESC LIMIT 100")
+    let rows = sqlx::query("SELECT e.id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE e.user_id=?1 ORDER BY e.created_at DESC,e.id DESC LIMIT 100")
         .bind(user_id)
         .fetch_all(db)
         .await
@@ -932,8 +956,8 @@ fn ledger_entry(row: sqlx::sqlite::SqliteRow) -> LedgerEntry {
         id: row.get(0),
         kind: row.get(1),
         status: row.get(2),
-        amount_usd_micros: row.get(3),
-        balance_delta_usd_micros: row.get(4),
+        amount_usd_nanos: row.get(3),
+        balance_delta_usd_nanos: row.get(4),
         created_at: row.get(5),
         posted_at: row.get(6),
         external_reference: row.get(7),
@@ -1116,8 +1140,8 @@ async fn insert_verified_deposit(
             kind: "deposit",
             status: "posted",
             asset_id: Some(&target.asset_id),
-            amount_usd_micros: verified.amount_usd_micros,
-            balance_delta_usd_micros: verified.amount_usd_micros,
+            amount_usd_nanos: verified.amount_usd_nanos,
+            balance_delta_usd_nanos: verified.amount_usd_nanos,
             counterparty_user_id: None,
             external_reference: Some(&reference),
             note: Some(note),
@@ -1404,7 +1428,7 @@ async fn create_transfer(
 ) -> Result<Json<TransferResponse>, ApiError> {
     let sender = require_initialized_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
-    if input.amount_usd_micros <= 0 {
+    if input.amount_usd_nanos <= 0 {
         return Err(ApiError::invalid(
             "transfer amount must be greater than zero",
         ));
@@ -1431,7 +1455,7 @@ async fn post_transfer(
     if let Some(existing) = operation_resource(db, sender, "transfer", idempotency_key).await? {
         return read_transfer_response(db, &existing).await;
     }
-    if available_balance(db, sender).await? < input.amount_usd_micros {
+    if available_balance(db, sender).await? < input.amount_usd_nanos {
         return Err(ApiError::conflict(
             "the available USD balance is insufficient",
         ));
@@ -1456,8 +1480,8 @@ async fn post_transfer(
             kind: "transfer_out",
             status: "posted",
             asset_id: None,
-            amount_usd_micros: input.amount_usd_micros,
-            balance_delta_usd_micros: -input.amount_usd_micros,
+            amount_usd_nanos: input.amount_usd_nanos,
+            balance_delta_usd_nanos: -input.amount_usd_nanos,
             counterparty_user_id: Some(&input.recipient_user_id),
             external_reference: Some(&outgoing_reference),
             note: input.note.as_deref(),
@@ -1474,8 +1498,8 @@ async fn post_transfer(
             kind: "transfer_in",
             status: "posted",
             asset_id: None,
-            amount_usd_micros: input.amount_usd_micros,
-            balance_delta_usd_micros: input.amount_usd_micros,
+            amount_usd_nanos: input.amount_usd_nanos,
+            balance_delta_usd_nanos: input.amount_usd_nanos,
             counterparty_user_id: Some(sender),
             external_reference: Some(&incoming_reference),
             note: input.note.as_deref(),
@@ -1483,11 +1507,11 @@ async fn post_transfer(
         },
     )
     .await?;
-    sqlx::query("INSERT INTO internal_transfers(id,sender_user_id,recipient_user_id,amount_usd_micros,sender_ledger_entry_id,recipient_ledger_entry_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)")
+    sqlx::query("INSERT INTO internal_transfers(id,sender_user_id,recipient_user_id,amount_usd_nanos,sender_ledger_entry_id,recipient_ledger_entry_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)")
         .bind(&transfer_id)
         .bind(sender)
         .bind(&input.recipient_user_id)
-        .bind(input.amount_usd_micros)
+        .bind(input.amount_usd_nanos)
         .bind(&sender_ledger_id)
         .bind(&recipient_ledger_id)
         .bind(&now)
@@ -1808,7 +1832,7 @@ async fn charge_payment_agreement(
 ) -> Result<Json<PaymentAgreementCharge>, ApiError> {
     let api_key = payment_agreement_api_key(&headers)?;
     let idempotency_key = idempotency_key(&headers)?;
-    if input.amount_usd_micros <= 0 {
+    if input.amount_usd_nanos <= 0 {
         return Err(ApiError::invalid(
             "automatic charge amount must be greater than zero",
         ));
@@ -1822,7 +1846,7 @@ async fn charge_payment_agreement(
             &state.db,
             &agreement,
             &input.user_id,
-            input.amount_usd_micros,
+            input.amount_usd_nanos,
             &idempotency_key,
         )
         .await?,
@@ -1833,7 +1857,7 @@ async fn post_payment_agreement_charge(
     db: &SqlitePool,
     agreement: &PaymentAgreement,
     payer_user_id: &str,
-    amount_usd_micros: i64,
+    amount_usd_nanos: i64,
     idempotency_key: &str,
 ) -> Result<PaymentAgreementCharge, ApiError> {
     let existing: Option<String> = sqlx::query_scalar(
@@ -1858,7 +1882,7 @@ async fn post_payment_agreement_charge(
             "this user has not authorized the automatic payment channel",
         ));
     }
-    if available_balance(db, payer_user_id).await? < amount_usd_micros {
+    if available_balance(db, payer_user_id).await? < amount_usd_nanos {
         return Err(ApiError::conflict(
             "the user's available USD balance is insufficient",
         ));
@@ -1879,8 +1903,8 @@ async fn post_payment_agreement_charge(
             kind: "transfer_out",
             status: "posted",
             asset_id: None,
-            amount_usd_micros,
-            balance_delta_usd_micros: -amount_usd_micros,
+            amount_usd_nanos,
+            balance_delta_usd_nanos: -amount_usd_nanos,
             counterparty_user_id: Some(&agreement.owner_user_id),
             external_reference: Some(&payer_reference),
             note: Some(&note),
@@ -1896,8 +1920,8 @@ async fn post_payment_agreement_charge(
             kind: "transfer_in",
             status: "posted",
             asset_id: None,
-            amount_usd_micros,
-            balance_delta_usd_micros: amount_usd_micros,
+            amount_usd_nanos,
+            balance_delta_usd_nanos: amount_usd_nanos,
             counterparty_user_id: Some(payer_user_id),
             external_reference: Some(&owner_reference),
             note: Some(&note),
@@ -1905,11 +1929,11 @@ async fn post_payment_agreement_charge(
         },
     )
     .await?;
-    sqlx::query("INSERT INTO payment_agreement_charges(id,agreement_id,payer_user_id,amount_usd_micros,payer_ledger_entry_id,owner_ledger_entry_id,idempotency_key,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")
+    sqlx::query("INSERT INTO payment_agreement_charges(id,agreement_id,payer_user_id,amount_usd_nanos,payer_ledger_entry_id,owner_ledger_entry_id,idempotency_key,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")
         .bind(&charge_id)
         .bind(&agreement.id)
         .bind(payer_user_id)
-        .bind(amount_usd_micros)
+        .bind(amount_usd_nanos)
         .bind(&payer_ledger_id)
         .bind(&owner_ledger_id)
         .bind(idempotency_key)
@@ -2001,20 +2025,20 @@ async fn read_payment_agreement_charge(
     db: &SqlitePool,
     id: &str,
 ) -> Result<PaymentAgreementCharge, ApiError> {
-    let row = sqlx::query("SELECT c.id,c.agreement_id,c.payer_user_id,a.owner_user_id,c.amount_usd_micros,c.created_at FROM payment_agreement_charges c JOIN payment_agreements a ON a.id=c.agreement_id WHERE c.id=?1")
+    let row = sqlx::query("SELECT c.id,c.agreement_id,c.payer_user_id,a.owner_user_id,c.amount_usd_nanos,c.created_at FROM payment_agreement_charges c JOIN payment_agreements a ON a.id=c.agreement_id WHERE c.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
         .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "automatic charge was not recorded"))?;
-    let amount_usd_micros: i64 = row.get(4);
+    let amount_usd_nanos: i64 = row.get(4);
     Ok(PaymentAgreementCharge {
         id: row.get(0),
         agreement_id: row.get(1),
         payer_user_id: row.get(2),
         owner_user_id: row.get(3),
-        amount_usd_micros,
-        amount_usd: format_usd(amount_usd_micros),
+        amount_usd_nanos,
+        amount_usd: format_usd(amount_usd_nanos),
         created_at: row.get(5),
     })
 }
@@ -2141,13 +2165,14 @@ async fn create_withdrawal(
 ) -> Result<Json<WithdrawalResponse>, ApiError> {
     let user_id = require_initialized_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
-    if input.amount_usd_micros <= 0 {
+    if input.amount_usd_nanos <= 0 {
         return Err(ApiError::invalid(
             "withdrawal amount must be greater than zero",
         ));
     }
-    builtin_asset(&input.asset_id)
+    let asset = builtin_asset(&input.asset_id)
         .ok_or_else(|| ApiError::invalid("the withdrawal asset is not supported"))?;
+    usd_nanos_to_token_units(input.amount_usd_nanos, asset.token_decimals)?;
     let destination_address = format!(
         "{:#x}",
         parse_address(&input.destination_address, "destination_address")?
@@ -2158,7 +2183,7 @@ async fn create_withdrawal(
     {
         return Ok(Json(read_withdrawal_response(&state.db, &existing).await?));
     }
-    if available_balance(&state.db, &user_id).await? < input.amount_usd_micros {
+    if available_balance(&state.db, &user_id).await? < input.amount_usd_nanos {
         return Err(ApiError::conflict(
             "the available USD balance is insufficient",
         ));
@@ -2176,8 +2201,8 @@ async fn create_withdrawal(
             kind: "withdrawal",
             status: "pending",
             asset_id: Some(&input.asset_id),
-            amount_usd_micros: input.amount_usd_micros,
-            balance_delta_usd_micros: -input.amount_usd_micros,
+            amount_usd_nanos: input.amount_usd_nanos,
+            balance_delta_usd_nanos: -input.amount_usd_nanos,
             counterparty_user_id: None,
             external_reference: Some(&withdrawal_reference),
             note: input.note.as_deref(),
@@ -2185,13 +2210,13 @@ async fn create_withdrawal(
         },
     )
     .await?;
-    sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,address_book_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,?3,?4,NULL,?5,?6,'awaiting_signer',?7,?7)")
+    sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,address_book_entry_id,destination_address,amount_usd_nanos,status,created_at,updated_at) VALUES(?1,?2,?3,?4,NULL,?5,?6,'awaiting_signer',?7,?7)")
         .bind(&withdrawal_id)
         .bind(&user_id)
         .bind(&input.asset_id)
         .bind(&ledger_id)
         .bind(&destination_address)
-        .bind(input.amount_usd_micros)
+        .bind(input.amount_usd_nanos)
         .bind(&now)
         .execute(&mut *tx)
         .await
@@ -2452,14 +2477,14 @@ async fn list_admin_deposits(
     headers: HeaderMap,
 ) -> Result<Json<Vec<AdminDeposit>>, ApiError> {
     require_root(&state, &headers).await?;
-    let rows = sqlx::query("SELECT d.id,d.user_id,w.address,a.symbol,n.chain_id,n.name,e.amount_usd_micros,d.transaction_hash,d.sweep_status,d.created_at,s.status,s.gas_transaction_hash,s.token_transaction_hash,s.error_message,s.updated_at FROM deposits d JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id JOIN ledger_entries e ON e.id=d.ledger_entry_id JOIN deposit_sweeps s ON s.deposit_id=d.id ORDER BY d.created_at DESC,d.id DESC LIMIT 100")
+    let rows = sqlx::query("SELECT d.id,d.user_id,w.address,a.symbol,n.chain_id,n.name,e.amount_usd_nanos,d.transaction_hash,d.sweep_status,d.created_at,s.status,s.gas_transaction_hash,s.token_transaction_hash,s.error_message,s.updated_at FROM deposits d JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id JOIN ledger_entries e ON e.id=d.ledger_entry_id JOIN deposit_sweeps s ON s.deposit_id=d.id ORDER BY d.created_at DESC,d.id DESC LIMIT 100")
         .fetch_all(&state.db)
         .await
         .map_err(db_error)?;
     Ok(Json(
         rows.into_iter()
             .map(|row| {
-                let amount_usd_micros: i64 = row.get(6);
+                let amount_usd_nanos: i64 = row.get(6);
                 AdminDeposit {
                     id: row.get(0),
                     user_id: row.get(1),
@@ -2467,8 +2492,8 @@ async fn list_admin_deposits(
                     asset_symbol: row.get(3),
                     chain_id: row.get(4),
                     network_name: row.get(5),
-                    amount_usd_micros,
-                    amount_usd: format_usd(amount_usd_micros),
+                    amount_usd_nanos,
+                    amount_usd: format_usd(amount_usd_nanos),
                     transaction_hash: row.get(7),
                     sweep_status: row.get(8),
                     created_at: row.get(9),
@@ -2488,14 +2513,14 @@ async fn list_admin_withdrawals(
     headers: HeaderMap,
 ) -> Result<Json<Vec<AdminWithdrawal>>, ApiError> {
     require_root(&state, &headers).await?;
-    let rows = sqlx::query("SELECT w.id,w.user_id,w.destination_address,a.symbol,n.chain_id,n.name,w.amount_usd_micros,w.transaction_hash,w.signed_transaction,w.status,w.last_error,w.created_at FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id ORDER BY w.created_at DESC,w.id DESC LIMIT 100")
+    let rows = sqlx::query("SELECT w.id,w.user_id,w.destination_address,a.symbol,n.chain_id,n.name,w.amount_usd_nanos,w.transaction_hash,w.signed_transaction,w.status,w.last_error,w.created_at FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id ORDER BY w.created_at DESC,w.id DESC LIMIT 100")
         .fetch_all(&state.db)
         .await
         .map_err(db_error)?;
     Ok(Json(
         rows.into_iter()
             .map(|row| {
-                let amount_usd_micros: i64 = row.get(6);
+                let amount_usd_nanos: i64 = row.get(6);
                 let transaction_hash: Option<String> = row.get(7);
                 let signed_transaction: Option<String> = row.get(8);
                 let status: String = row.get(9);
@@ -2506,8 +2531,8 @@ async fn list_admin_withdrawals(
                     asset_symbol: row.get(3),
                     chain_id: row.get(4),
                     network_name: row.get(5),
-                    amount_usd_micros,
-                    amount_usd: format_usd(amount_usd_micros),
+                    amount_usd_nanos,
+                    amount_usd: format_usd(amount_usd_nanos),
                     transaction_hash: transaction_hash.clone(),
                     status: status.clone(),
                     last_error: row.get(10),
@@ -2553,23 +2578,23 @@ async fn list_admin_balances(
 }
 
 async fn load_admin_balances(db: &SqlitePool) -> Result<AdminBalancesResponse, ApiError> {
-    let summary = sqlx::query("SELECT COUNT(*),COALESCE(SUM(CASE WHEN available_usd_micros>0 THEN 1 ELSE 0 END),0),COALESCE(SUM(available_usd_micros),0) FROM (SELECT u.id,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_micros ELSE 0 END),0) AS available_usd_micros FROM users u LEFT JOIN ledger_entries e ON e.user_id=u.id GROUP BY u.id)")
+    let summary = sqlx::query("SELECT COUNT(*),COALESCE(SUM(CASE WHEN available_usd_nanos>0 THEN 1 ELSE 0 END),0),COALESCE(SUM(available_usd_nanos),0) FROM (SELECT u.id,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) AS available_usd_nanos FROM users u LEFT JOIN ledger_entries e ON e.user_id=u.id GROUP BY u.id)")
         .fetch_one(db)
         .await
         .map_err(db_error)?;
-    let total_available_usd_micros: i64 = summary.get(2);
-    let users = sqlx::query("SELECT u.id,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_micros ELSE 0 END),0) FROM users u LEFT JOIN ledger_entries e ON e.user_id=u.id GROUP BY u.id,u.created_at ORDER BY 3 DESC,u.created_at DESC,u.id DESC")
+    let total_available_usd_nanos: i64 = summary.get(2);
+    let users = sqlx::query("SELECT u.id,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u LEFT JOIN ledger_entries e ON e.user_id=u.id GROUP BY u.id,u.created_at ORDER BY 3 DESC,u.created_at DESC,u.id DESC")
         .fetch_all(db)
         .await
         .map_err(db_error)?
         .into_iter()
         .map(|row| {
-            let available_usd_micros: i64 = row.get(2);
+            let available_usd_nanos: i64 = row.get(2);
             AdminUserBalance {
                 user_id: row.get(0),
                 created_at: row.get(1),
-                available_usd_micros,
-                available_usd: format_usd(available_usd_micros),
+                available_usd_nanos,
+                available_usd: format_usd(available_usd_nanos),
             }
         })
         .collect();
@@ -2577,8 +2602,8 @@ async fn load_admin_balances(db: &SqlitePool) -> Result<AdminBalancesResponse, A
         summary: AdminBalanceSummary {
             user_count: summary.get(0),
             funded_user_count: summary.get(1),
-            total_available_usd_micros,
-            total_available_usd: format_usd(total_available_usd_micros),
+            total_available_usd_nanos,
+            total_available_usd: format_usd(total_available_usd_nanos),
         },
         users,
     })
@@ -2667,7 +2692,7 @@ async fn load_admin_ledger(
         .fetch_one(db)
         .await
         .map_err(db_error)?;
-    let rows = sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_micros,e.balance_delta_usd_micros,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE (?1 IS NULL OR e.kind=?1) AND (?2 IS NULL OR e.status=?2) AND (?3 IS NULL OR e.user_id=?3) ORDER BY e.created_at DESC,e.id DESC LIMIT ?4 OFFSET ?5")
+    let rows = sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE (?1 IS NULL OR e.kind=?1) AND (?2 IS NULL OR e.status=?2) AND (?3 IS NULL OR e.user_id=?3) ORDER BY e.created_at DESC,e.id DESC LIMIT ?4 OFFSET ?5")
         .bind(kind)
         .bind(status)
         .bind(user_id)
@@ -2685,8 +2710,8 @@ async fn load_admin_ledger(
                 counterparty_user_id: row.get(2),
                 kind: row.get(3),
                 status: row.get(4),
-                amount_usd_micros: row.get(5),
-                balance_delta_usd_micros: row.get(6),
+                amount_usd_nanos: row.get(5),
+                balance_delta_usd_nanos: row.get(6),
                 created_at: row.get(7),
                 posted_at: row.get(8),
                 external_reference: row.get(9),
@@ -3055,7 +3080,7 @@ async fn sign_withdrawal(
     let transfer_data = Erc20::new(contract_address, Arc::new(provider.clone()))
         .transfer(
             parse_address(&target.destination_address, "stored withdrawal destination")?,
-            usd_micros_to_token_units(target.amount_usd_micros, target.token_decimals)?,
+            usd_nanos_to_token_units(target.amount_usd_nanos, target.token_decimals)?,
         )
         .calldata()
         .ok_or_else(|| {
@@ -3309,9 +3334,9 @@ fn verified_deposit_transfer(
             continue;
         }
         let amount = U256::from_big_endian(log.data.0.as_ref());
-        let amount_usd_micros = token_units_to_usd_micros(amount, target.token_decimals)?;
+        let amount_usd_nanos = token_units_to_usd_nanos(amount, target.token_decimals)?;
         return Ok(VerifiedDeposit {
-            amount_usd_micros,
+            amount_usd_nanos,
             raw_amount: amount.to_string(),
             transaction_hash: format!("{transaction_hash:#x}"),
             log_index: log_index as i64,
@@ -3324,17 +3349,17 @@ fn verified_deposit_transfer(
 }
 
 async fn read_deposit_response(db: &SqlitePool, id: &str) -> Result<DepositResponse, ApiError> {
-    let row = sqlx::query("SELECT d.id,e.amount_usd_micros,a.symbol,d.transaction_hash,d.sweep_status FROM deposits d JOIN ledger_entries e ON e.id=d.ledger_entry_id JOIN supported_assets a ON a.id=d.asset_id WHERE d.id=?1")
+    let row = sqlx::query("SELECT d.id,e.amount_usd_nanos,a.symbol,d.transaction_hash,d.sweep_status FROM deposits d JOIN ledger_entries e ON e.id=d.ledger_entry_id JOIN supported_assets a ON a.id=d.asset_id WHERE d.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
         .ok_or_else(|| ApiError::invalid("deposit does not exist"))?;
-    let amount_usd_micros: i64 = row.get(1);
+    let amount_usd_nanos: i64 = row.get(1);
     Ok(DepositResponse {
         id: row.get(0),
-        amount_usd_micros,
-        amount_usd: format_usd(amount_usd_micros),
+        amount_usd_nanos,
+        amount_usd: format_usd(amount_usd_nanos),
         asset_symbol: row.get(2),
         transaction_hash: row.get(3),
         sweep_status: row.get(4),
@@ -3343,19 +3368,19 @@ async fn read_deposit_response(db: &SqlitePool, id: &str) -> Result<DepositRespo
 
 async fn read_transfer_response(db: &SqlitePool, id: &str) -> Result<TransferResponse, ApiError> {
     let row = sqlx::query(
-        "SELECT id,recipient_user_id,amount_usd_micros FROM internal_transfers WHERE id=?1",
+        "SELECT id,recipient_user_id,amount_usd_nanos FROM internal_transfers WHERE id=?1",
     )
     .bind(id)
     .fetch_optional(db)
     .await
     .map_err(db_error)?
     .ok_or_else(|| ApiError::invalid("transfer does not exist"))?;
-    let amount_usd_micros: i64 = row.get(2);
+    let amount_usd_nanos: i64 = row.get(2);
     Ok(TransferResponse {
         id: row.get(0),
         recipient_user_id: row.get(1),
-        amount_usd_micros,
-        amount_usd: format_usd(amount_usd_micros),
+        amount_usd_nanos,
+        amount_usd: format_usd(amount_usd_nanos),
         status: "posted",
     })
 }
@@ -3364,21 +3389,21 @@ async fn read_withdrawal_response(
     db: &SqlitePool,
     id: &str,
 ) -> Result<WithdrawalResponse, ApiError> {
-    let row = sqlx::query("SELECT w.id,a.symbol,w.destination_address,w.address_book_entry_id,b.label,w.amount_usd_micros,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id LEFT JOIN address_book_entries b ON b.id=w.address_book_entry_id WHERE w.id=?1")
+    let row = sqlx::query("SELECT w.id,a.symbol,w.destination_address,w.address_book_entry_id,b.label,w.amount_usd_nanos,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id LEFT JOIN address_book_entries b ON b.id=w.address_book_entry_id WHERE w.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
         .ok_or_else(|| ApiError::invalid("withdrawal does not exist"))?;
-    let amount_usd_micros: i64 = row.get(5);
+    let amount_usd_nanos: i64 = row.get(5);
     Ok(WithdrawalResponse {
         id: row.get(0),
         asset_symbol: row.get(1),
         destination_address: row.get(2),
         address_book_entry_id: row.get(3),
         destination_label: row.get(4),
-        amount_usd_micros,
-        amount_usd: format_usd(amount_usd_micros),
+        amount_usd_nanos,
+        amount_usd: format_usd(amount_usd_nanos),
         transaction_hash: row.get(6),
         status: row.get(7),
     })
@@ -3389,7 +3414,7 @@ async fn load_withdrawal_target(
     id: &str,
     user_id: Option<&str>,
 ) -> Result<WithdrawalTarget, ApiError> {
-    let row = sqlx::query("SELECT a.contract_address,n.rpc_url,n.chain_id,w.destination_address,w.amount_usd_micros,a.token_decimals,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE w.id=?1")
+    let row = sqlx::query("SELECT a.contract_address,n.rpc_url,n.chain_id,w.destination_address,w.amount_usd_nanos,a.token_decimals,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE w.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
@@ -3416,7 +3441,7 @@ async fn load_withdrawal_target(
         rpc_url: row.get(1),
         chain_id: row.get(2),
         destination_address: row.get(3),
-        amount_usd_micros: row.get(4),
+        amount_usd_nanos: row.get(4),
         token_decimals: row.get::<i64, _>(5) as u8,
         transaction_hash: row.get(6),
         signed_transaction,
@@ -3585,29 +3610,47 @@ fn builtin_assets() -> Vec<SupportedAsset> {
         .collect()
 }
 
-fn token_units_to_usd_micros(amount: U256, token_decimals: u8) -> Result<i64, ApiError> {
-    let scale = U256::exp10((token_decimals - 6) as usize);
-    if amount.is_zero() || amount % scale != U256::zero() {
+fn token_units_to_usd_nanos(amount: U256, token_decimals: u8) -> Result<i64, ApiError> {
+    if amount.is_zero() {
         return Err(ApiError::invalid(
-            "the confirmed token amount must be a positive whole USD micro amount",
+            "the confirmed token amount must be positive",
         ));
     }
-    let micros = amount / scale;
-    if micros > U256::from(i64::MAX as u64) {
+    let nanos = if token_decimals >= 9 {
+        let scale = U256::exp10((token_decimals - 9) as usize);
+        if amount % scale != U256::zero() {
+            return Err(ApiError::invalid(
+                "the confirmed token amount exceeds Midas's USD nanodollar precision",
+            ));
+        }
+        amount / scale
+    } else {
+        amount * U256::exp10((9 - token_decimals) as usize)
+    };
+    if nanos > U256::from(i64::MAX as u64) {
         return Err(ApiError::invalid(
             "the confirmed token amount is outside Midas's USD ledger range",
         ));
     }
-    Ok(micros.as_u64() as i64)
+    Ok(nanos.as_u64() as i64)
 }
 
-fn usd_micros_to_token_units(value: i64, token_decimals: u8) -> Result<U256, ApiError> {
+fn usd_nanos_to_token_units(value: i64, token_decimals: u8) -> Result<U256, ApiError> {
     if value <= 0 {
         return Err(ApiError::invalid(
             "withdrawal amount must be greater than zero",
         ));
     }
-    Ok(U256::from(value as u64) * U256::exp10((token_decimals - 6) as usize))
+    if token_decimals >= 9 {
+        return Ok(U256::from(value as u64) * U256::exp10((token_decimals - 9) as usize));
+    }
+    let nanos_per_token_unit = 10_i64.pow((9 - token_decimals) as u32);
+    if value % nanos_per_token_unit != 0 {
+        return Err(ApiError::invalid(
+            "withdrawal amount is not representable by the selected token's decimal precision",
+        ));
+    }
+    Ok(U256::from((value / nanos_per_token_unit) as u64))
 }
 
 fn address_book_label(value: &str) -> Result<String, ApiError> {
@@ -3651,7 +3694,7 @@ fn address_book_entry(row: sqlx::sqlite::SqliteRow) -> Result<AddressBookEntry, 
 }
 
 async fn available_balance(db: &SqlitePool, user_id: &str) -> Result<i64, ApiError> {
-    sqlx::query_scalar("SELECT COALESCE(SUM(balance_delta_usd_micros),0) FROM ledger_entries WHERE user_id=?1 AND status IN ('posted','pending')")
+    sqlx::query_scalar("SELECT COALESCE(SUM(balance_delta_usd_nanos),0) FROM ledger_entries WHERE user_id=?1 AND status IN ('posted','pending')")
         .bind(user_id)
         .fetch_one(db)
         .await
@@ -3662,14 +3705,14 @@ async fn insert_ledger(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     entry: LedgerInsert<'_>,
 ) -> Result<(), ApiError> {
-    sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_micros,balance_delta_usd_micros,counterparty_user_id,external_reference,note,created_at,posted_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,CASE WHEN ?4='posted' THEN ?11 ELSE NULL END)")
+    sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,counterparty_user_id,external_reference,note,created_at,posted_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,CASE WHEN ?4='posted' THEN ?11 ELSE NULL END)")
         .bind(entry.id)
         .bind(entry.user_id)
         .bind(entry.kind)
         .bind(entry.status)
         .bind(entry.asset_id)
-        .bind(entry.amount_usd_micros)
-        .bind(entry.balance_delta_usd_micros)
+        .bind(entry.amount_usd_nanos)
+        .bind(entry.balance_delta_usd_nanos)
         .bind(entry.counterparty_user_id)
         .bind(entry.external_reference)
         .bind(entry.note)
@@ -3843,10 +3886,14 @@ fn db_error(_: sqlx::Error) -> ApiError {
     )
 }
 
-fn format_usd(micros: i64) -> String {
-    let sign = if micros < 0 { "-" } else { "" };
-    let absolute = micros.unsigned_abs();
-    format!("{sign}{}.{:06}", absolute / 1_000_000, absolute % 1_000_000)
+fn format_usd(nanos: i64) -> String {
+    let sign = if nanos < 0 { "-" } else { "" };
+    let absolute = nanos.unsigned_abs();
+    format!(
+        "{sign}{}.{:09}",
+        absolute / 1_000_000_000,
+        absolute % 1_000_000_000
+    )
 }
 
 async fn open_db(path: &PathBuf) -> anyhow::Result<SqlitePool> {
@@ -3888,6 +3935,7 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             .execute(db)
             .await?;
     }
+    migrate_usd_ledger_to_nanodollars(db).await?;
     sqlx::query("DELETE FROM app_meta WHERE key='etherscan_api_key'")
         .execute(db)
         .await?;
@@ -3903,6 +3951,73 @@ async fn table_has_column(db: &SqlitePool, table: &str, column: &str) -> anyhow:
     Ok(rows
         .iter()
         .any(|row| row.get::<String, _>("name") == column))
+}
+
+async fn migrate_usd_ledger_to_nanodollars(db: &SqlitePool) -> anyhow::Result<()> {
+    let unit_marker = meta(db, USD_LEDGER_UNIT_KEY).await?;
+    if unit_marker.as_deref() == Some(USD_LEDGER_UNIT_NANODOLLARS) {
+        return Ok(());
+    }
+    if let Some(unit_marker) = unit_marker {
+        anyhow::bail!("unsupported USD ledger unit marker: {unit_marker}");
+    }
+
+    let mut legacy_column_count = 0;
+    let mut nanos_column_count = 0;
+    for (table, legacy_column, nanos_column) in USD_LEDGER_COLUMNS {
+        legacy_column_count += table_has_column(db, table, legacy_column).await? as usize;
+        nanos_column_count += table_has_column(db, table, nanos_column).await? as usize;
+    }
+    if legacy_column_count != 0 && nanos_column_count != 0 {
+        anyhow::bail!("USD ledger schema mixes micro-dollar and nanodollar columns");
+    }
+    if legacy_column_count != 0 && legacy_column_count != USD_LEDGER_COLUMNS.len() {
+        anyhow::bail!("USD ledger schema is missing one or more micro-dollar columns");
+    }
+    if nanos_column_count != 0 && nanos_column_count != USD_LEDGER_COLUMNS.len() {
+        anyhow::bail!("USD ledger schema is missing one or more nanodollar columns");
+    }
+    if legacy_column_count == 0 && nanos_column_count == 0 {
+        anyhow::bail!("USD ledger schema has no recognized amount columns");
+    }
+
+    let mut tx = db.begin().await?;
+    if legacy_column_count == USD_LEDGER_COLUMNS.len() {
+        for (table, legacy_column, nanos_column) in USD_LEDGER_COLUMNS {
+            sqlx::query(&format!(
+                "ALTER TABLE {table} RENAME COLUMN {legacy_column} TO {nanos_column}"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        }
+        for (table, _, nanos_column) in USD_LEDGER_COLUMNS {
+            let overflowing_rows: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE {nanos_column}>?1 OR {nanos_column}<?2"
+            ))
+            .bind(MAX_LEGACY_MICROS_FOR_NANO_MIGRATION)
+            .bind(MIN_LEGACY_MICROS_FOR_NANO_MIGRATION)
+            .fetch_one(&mut *tx)
+            .await?;
+            if overflowing_rows != 0 {
+                anyhow::bail!(
+                    "cannot migrate {table}.{nanos_column}: multiplying a legacy micro-dollar value would overflow i64"
+                );
+            }
+            sqlx::query(&format!(
+                "UPDATE {table} SET {nanos_column}={nanos_column}*{USD_NANOS_PER_MICRO}"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    sqlx::query("INSERT INTO app_meta(key,value,updated_at) VALUES(?1,?2,?3)")
+        .bind(USD_LEDGER_UNIT_KEY)
+        .bind(USD_LEDGER_UNIT_NANODOLLARS)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn seed_builtin_evm(db: &SqlitePool) -> anyhow::Result<()> {
@@ -4054,10 +4169,137 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[tokio::test]
+    async fn migrates_legacy_microdollar_history_to_nanodollars_once() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        sqlx::query("DELETE FROM app_meta WHERE key=?1")
+            .bind(USD_LEDGER_UNIT_KEY)
+            .execute(&db)
+            .await
+            .unwrap();
+        for (table, legacy_column, nanos_column) in USD_LEDGER_COLUMNS {
+            sqlx::query(&format!(
+                "ALTER TABLE {table} RENAME COLUMN {nanos_column} TO {legacy_column}"
+            ))
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        let user_id = Uuid::new_v4().to_string();
+        let agreement_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO payment_agreements(id,owner_user_id,name,api_key_hash,api_key_prefix,created_at,updated_at) VALUES(?1,?2,'Legacy channel','legacy-key-hash','legacy-key',?3,?3)")
+            .bind(&agreement_id)
+            .bind(&user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        for (id, amount_usd_micros, balance_delta_usd_micros) in [
+            ("legacy-transfer-out", 1_250_000_i64, -1_250_000_i64),
+            ("legacy-transfer-in", 1_250_000_i64, 1_250_000_i64),
+            ("legacy-charge-out", 500_000_i64, -500_000_i64),
+            ("legacy-charge-in", 500_000_i64, 500_000_i64),
+            ("legacy-withdrawal", 2_000_000_i64, -2_000_000_i64),
+        ] {
+            sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'adjustment','posted',?3,?4,?5)")
+                .bind(id)
+                .bind(&user_id)
+                .bind(amount_usd_micros)
+                .bind(balance_delta_usd_micros)
+                .bind(&now)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO internal_transfers(id,sender_user_id,recipient_user_id,amount_usd_micros,sender_ledger_entry_id,recipient_ledger_entry_id,created_at) VALUES('legacy-transfer',?1,?1,1250000,'legacy-transfer-out','legacy-transfer-in',?2)")
+            .bind(&user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO payment_agreement_charges(id,agreement_id,payer_user_id,amount_usd_micros,payer_ledger_entry_id,owner_ledger_entry_id,idempotency_key,created_at) VALUES('legacy-charge',?1,?2,500000,'legacy-charge-out','legacy-charge-in','legacy-idempotency',?3)")
+            .bind(&agreement_id)
+            .bind(&user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES('legacy-withdrawal',?1,'1-USDC','legacy-withdrawal','0x0000000000000000000000000000000000000001',2000000,'completed',?2,?2)")
+            .bind(&user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        migrate(&db).await.unwrap();
+        for (table, legacy_column, nanos_column) in USD_LEDGER_COLUMNS {
+            assert!(!table_has_column(&db, table, legacy_column).await.unwrap());
+            assert!(table_has_column(&db, table, nanos_column).await.unwrap());
+        }
+        let migrated_ledger = sqlx::query("SELECT amount_usd_nanos,balance_delta_usd_nanos FROM ledger_entries WHERE id='legacy-transfer-out'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(migrated_ledger.get::<i64, _>(0), 1_250_000_000);
+        assert_eq!(migrated_ledger.get::<i64, _>(1), -1_250_000_000);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT amount_usd_nanos FROM internal_transfers WHERE id='legacy-transfer'"
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            1_250_000_000
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT amount_usd_nanos FROM payment_agreement_charges WHERE id='legacy-charge'"
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            500_000_000
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT amount_usd_nanos FROM withdrawals WHERE id='legacy-withdrawal'"
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            2_000_000_000
+        );
+        assert_eq!(
+            meta(&db, USD_LEDGER_UNIT_KEY).await.unwrap().as_deref(),
+            Some(USD_LEDGER_UNIT_NANODOLLARS)
+        );
+
+        migrate(&db).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT amount_usd_nanos FROM internal_transfers WHERE id='legacy-transfer'"
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            1_250_000_000
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
-    fn formats_usd_micros() {
-        assert_eq!(format_usd(1_250_000), "1.250000");
-        assert_eq!(format_usd(-1), "-0.000001");
+    fn formats_usd_nanos() {
+        assert_eq!(format_usd(1_250_000_000), "1.250000000");
+        assert_eq!(format_usd(-1), "-0.000000001");
     }
 
     #[test]
@@ -4111,7 +4353,7 @@ mod tests {
             token_decimals: 6,
         };
         let verified = VerifiedDeposit {
-            amount_usd_micros: 2_000_000,
+            amount_usd_nanos: 2_000_000,
             raw_amount: "2000000".to_string(),
             transaction_hash: format!("0x{}", "a".repeat(64)),
             log_index: 4,
@@ -4254,14 +4496,14 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'withdrawal','pending','56-USDT',1000000,-1000000,?3)")
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'withdrawal','pending','56-USDT',1000000,-1000000,?3)")
             .bind(&ledger_id)
             .bind(&user_id)
             .bind(&now)
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,'56-USDT',?3,'0x0000000000000000000000000000000000000001',1000000,'awaiting_signer',?4,?4)")
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_nanos,status,created_at,updated_at) VALUES(?1,?2,'56-USDT',?3,'0x0000000000000000000000000000000000000001',1000000,'awaiting_signer',?4,?4)")
             .bind(&withdrawal_id)
             .bind(&user_id)
             .bind(&ledger_id)
@@ -4397,7 +4639,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'adjustment','posted',2000000,2000000,?3)")
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment','posted',2000000,2000000,?3)")
             .bind(Uuid::new_v4().to_string())
             .bind(&sender)
             .bind(&now)
@@ -4407,7 +4649,7 @@ mod tests {
 
         let request = TransferRequest {
             recipient_user_id: recipient.clone(),
-            amount_usd_micros: 750_000,
+            amount_usd_nanos: 750_000,
             note: Some("Wallet creation transfer".to_string()),
         };
         let transfer = post_transfer(&db, &sender, &request, "new-recipient")
@@ -4444,7 +4686,7 @@ mod tests {
             1
         );
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT balance_delta_usd_micros FROM ledger_entries WHERE user_id=?1 AND kind='transfer_in'")
+            sqlx::query_scalar::<_, i64>("SELECT balance_delta_usd_nanos FROM ledger_entries WHERE user_id=?1 AND kind='transfer_in'")
                 .bind(&recipient)
                 .fetch_one(&db)
                 .await
@@ -4467,7 +4709,7 @@ mod tests {
         let request: WithdrawalRequest = serde_json::from_value(serde_json::json!({
             "asset_id": "1-USDC",
             "destination_address": "0x0000000000000000000000000000000000000001",
-            "amount_usd_micros": 1_000_000,
+            "amount_usd_nanos": 1_000_000,
         }))
         .unwrap();
         assert_eq!(
@@ -4491,14 +4733,14 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'withdrawal','pending','1-USDC',1000000,-1000000,?3)")
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'withdrawal','pending','1-USDC',1000000,-1000000,?3)")
             .bind(&ledger_id)
             .bind(&user_id)
             .bind(&now)
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,status,created_at,updated_at) VALUES(?1,?2,'1-USDC',?3,?4,1000000,'awaiting_signer',?5,?5)")
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_nanos,status,created_at,updated_at) VALUES(?1,?2,'1-USDC',?3,?4,1000000,'awaiting_signer',?5,?5)")
             .bind(&withdrawal_id)
             .bind(&user_id)
             .bind(&ledger_id)
@@ -4542,14 +4784,25 @@ mod tests {
         assert_eq!(builtin_asset("56-USDC").unwrap().token_decimals, 18);
         assert_eq!(builtin_asset("8453-USDT").unwrap().chain_id, 8453);
         assert_eq!(
-            token_units_to_usd_micros(U256::exp10(18), 18).unwrap(),
-            1_000_000
+            token_units_to_usd_nanos(U256::exp10(18), 18).unwrap(),
+            1_000_000_000
         );
         assert_eq!(
-            usd_micros_to_token_units(1_000_000, 18).unwrap(),
+            usd_nanos_to_token_units(1_000_000_000, 18).unwrap(),
             U256::exp10(18)
         );
-        assert!(token_units_to_usd_micros(U256::from(1_u64), 18).is_err());
+        assert_eq!(
+            token_units_to_usd_nanos(U256::exp10(6), 6).unwrap(),
+            1_000_000_000
+        );
+        assert_eq!(
+            usd_nanos_to_token_units(1_000_000_000, 6).unwrap(),
+            U256::exp10(6)
+        );
+        assert_eq!(token_units_to_usd_nanos(U256::exp10(9), 18).unwrap(), 1);
+        assert_eq!(usd_nanos_to_token_units(1, 18).unwrap(), U256::exp10(9));
+        assert!(usd_nanos_to_token_units(1, 6).is_err());
+        assert!(token_units_to_usd_nanos(U256::from(1_u64), 18).is_err());
     }
 
     #[test]
@@ -4591,7 +4844,7 @@ mod tests {
             &[log],
         )
         .unwrap();
-        assert_eq!(verified.amount_usd_micros, 2_990_000);
+        assert_eq!(verified.amount_usd_nanos, 2_990_000_000);
         assert_eq!(verified.raw_amount, "2990000000000000000");
         assert_eq!(
             builtin_network(56).unwrap().rpc_url,
@@ -4629,7 +4882,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE withdrawals (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, ledger_entry_id TEXT NOT NULL, destination_address TEXT NOT NULL, amount_usd_micros INTEGER NOT NULL, transaction_hash TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        sqlx::query("CREATE TABLE withdrawals (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, ledger_entry_id TEXT NOT NULL, destination_address TEXT NOT NULL, amount_usd_nanos INTEGER NOT NULL, transaction_hash TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
             .execute(&db)
             .await
             .unwrap();
@@ -4679,7 +4932,7 @@ mod tests {
             ("pending", -500_000),
             ("rejected", -750_000),
         ] {
-            sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'adjustment',?3,0,?4,?5)")
+            sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment',?3,0,?4,?5)")
                 .bind(Uuid::new_v4().to_string())
                 .bind(&user_id)
                 .bind(status)
@@ -4717,7 +4970,7 @@ mod tests {
         let deposit_ledger_id = Uuid::new_v4().to_string();
         let withdrawal_ledger_id = Uuid::new_v4().to_string();
         let transfer_ledger_id = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_micros,balance_delta_usd_micros,counterparty_user_id,external_reference,created_at) VALUES(?1,?2,'deposit','posted','56-USDT',2500000,2500000,NULL,'deposit-reference',?3),(?4,?2,'withdrawal','posted','1-USDC',750000,-750000,NULL,'withdrawal-reference',?3),(?5,?2,'transfer_out','posted',NULL,200000,-200000,?6,'transfer-reference',?3)")
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,counterparty_user_id,external_reference,created_at) VALUES(?1,?2,'deposit','posted','56-USDT',2500000,2500000,NULL,'deposit-reference',?3),(?4,?2,'withdrawal','posted','1-USDC',750000,-750000,NULL,'withdrawal-reference',?3),(?5,?2,'transfer_out','posted',NULL,200000,-200000,?6,'transfer-reference',?3)")
             .bind(&deposit_ledger_id)
             .bind(&user_id)
             .bind(&now)
@@ -4736,7 +4989,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,transaction_hash,status,created_at,updated_at) VALUES(?1,?2,'1-USDC',?3,'0x0000000000000000000000000000000000000001',750000,'0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','completed',?4,?4)")
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_nanos,transaction_hash,status,created_at,updated_at) VALUES(?1,?2,'1-USDC',?3,'0x0000000000000000000000000000000000000001',750000,'0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','completed',?4,?4)")
             .bind(Uuid::new_v4().to_string())
             .bind(&user_id)
             .bind(&withdrawal_ledger_id)
@@ -4748,7 +5001,7 @@ mod tests {
         let balances = load_admin_balances(&db).await.unwrap();
         assert_eq!(balances.summary.user_count, 2);
         assert_eq!(balances.summary.funded_user_count, 1);
-        assert_eq!(balances.summary.total_available_usd_micros, 1_550_000);
+        assert_eq!(balances.summary.total_available_usd_nanos, 1_550_000);
         assert_eq!(balances.users[0].user_id, user_id);
         let personal_ledger = load_user_ledger(&db, &user_id).await.unwrap();
         let personal_deposit = personal_ledger
@@ -4886,7 +5139,7 @@ mod tests {
             .unwrap();
         for asset_id in ["1-USDC", "1-USDT"] {
             let ledger_id = Uuid::new_v4().to_string();
-            sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'withdrawal','posted',?3,1000000,-1000000,?4)")
+            sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'withdrawal','posted',?3,1000000,-1000000,?4)")
                 .bind(&ledger_id)
                 .bind(&user_id)
                 .bind(asset_id)
@@ -4894,7 +5147,7 @@ mod tests {
                 .execute(&db)
                 .await
                 .unwrap();
-            sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_micros,transaction_hash,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,1000000,?6,'completed',?7,?7)")
+            sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_nanos,transaction_hash,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,1000000,?6,'completed',?7,?7)")
                 .bind(Uuid::new_v4().to_string())
                 .bind(&user_id)
                 .bind(asset_id)
@@ -5039,7 +5292,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_micros,balance_delta_usd_micros,created_at) VALUES(?1,?2,'adjustment','posted',2000000,2000000,?3)")
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment','posted',2000000,2000000,?3)")
             .bind(Uuid::new_v4().to_string())
             .bind(&payer_user_id)
             .bind(&now)
