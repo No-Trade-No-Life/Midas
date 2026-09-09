@@ -56,8 +56,8 @@ const LEGACY_GAS_ACCOUNT_PRIVATE_KEY_KEY: &str = "evm_gas_account_private_key";
 const LEGACY_COLLECTION_WALLET_PRIVATE_KEY_KEY: &str = "evm_collection_wallet_private_key";
 const DEFAULT_GAS_FUNDING_WEI: &str = "1000000000000000";
 // `wallet_addresses.chain_id` remains on disk for existing SQLite databases.
-// A user deposit key is EVM-compatible, so new rows use this internal sentinel
-// and no API or query exposes it as a per-chain choice.
+// A human-user deposit key is EVM-compatible, so new rows use this internal
+// sentinel and no API or query exposes it as a per-chain choice.
 const EVM_ADDRESS_SENTINEL_CHAIN_ID: i64 = 1;
 const DEPOSIT_DISCOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RPC_DISCOVERY_BOOTSTRAP_BLOCKS: i64 = 1_024;
@@ -484,7 +484,6 @@ struct FundUser {
     id: String,
     name: String,
     api_key_prefix: String,
-    wallet_address: String,
     available_usd_nanos: i64,
     available_usd: String,
     created_at: String,
@@ -901,10 +900,6 @@ fn app(state: AppState) -> Router {
             "/admin/fund-users/:id/api-key",
             post(rotate_fund_user_api_key),
         )
-        .route(
-            "/admin/fund-users/:id/withdrawals",
-            post(create_fund_user_withdrawal),
-        )
         .route("/admin/fund-users/:id/ledger", get(fund_user_ledger))
         .route("/admin/balances", get(list_admin_balances))
         .route("/admin/ledger", get(list_admin_ledger))
@@ -998,7 +993,7 @@ async fn list_assets(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SupportedAsset>>, ApiError> {
-    require_fund_or_human_user(&state, &headers).await?;
+    require_initialized_user(&state, &headers).await?;
     Ok(Json(builtin_assets()))
 }
 
@@ -1006,7 +1001,7 @@ async fn my_balance(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Balance>, ApiError> {
-    let user_id = require_fund_or_human_user(&state, &headers).await?;
+    let user_id = require_internal_user(&state, &headers).await?;
     let nanos = available_balance(&state.db, &user_id).await?;
     Ok(Json(Balance {
         currency: "USD",
@@ -1019,7 +1014,7 @@ async fn my_ledger(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<LedgerEntry>>, ApiError> {
-    let user_id = require_fund_or_human_user(&state, &headers).await?;
+    let user_id = require_internal_user(&state, &headers).await?;
     Ok(Json(load_user_ledger(&state.db, &user_id).await?))
 }
 
@@ -1054,7 +1049,7 @@ async fn my_wallet_addresses(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WalletAddress>>, ApiError> {
-    let user_id = require_fund_or_human_user(&state, &headers).await?;
+    let user_id = require_initialized_user(&state, &headers).await?;
     let row = sqlx::query("SELECT address,created_at FROM wallet_addresses WHERE user_id=?1 ORDER BY created_at,id LIMIT 1")
         .bind(user_id)
         .fetch_optional(&state.db)
@@ -1064,22 +1059,35 @@ async fn my_wallet_addresses(
     Ok(Json(vec![wallet_address(row)]))
 }
 
-async fn ensure_user_wallet(state: &AppState, user_id: &str) -> Result<WalletAddress, ApiError> {
+async fn ensure_human_user_wallet(
+    state: &AppState,
+    user_id: &str,
+) -> Result<WalletAddress, ApiError> {
     let _write = state.write_lock.lock().await;
-    provision_user_wallet(&state.db, user_id).await
+    provision_human_wallet(&state.db, user_id).await
 }
 
-async fn provision_user_wallet(db: &SqlitePool, user_id: &str) -> Result<WalletAddress, ApiError> {
+async fn provision_human_wallet(db: &SqlitePool, user_id: &str) -> Result<WalletAddress, ApiError> {
     let mut tx = db.begin().await.map_err(db_error)?;
-    let wallet = provision_user_wallet_in_transaction(&mut tx, user_id).await?;
+    let wallet = provision_human_wallet_in_transaction(&mut tx, user_id).await?;
     tx.commit().await.map_err(db_error)?;
     Ok(wallet)
 }
 
-async fn provision_user_wallet_in_transaction(
+async fn provision_human_wallet_in_transaction(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     user_id: &str,
 ) -> Result<WalletAddress, ApiError> {
+    let kind: String = sqlx::query_scalar("SELECT kind FROM users WHERE id=?1")
+        .bind(user_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db_error)?;
+    if kind != "human" {
+        return Err(ApiError::invalid(
+            "fund users cannot have EVM deposit wallets",
+        ));
+    }
     if let Some(row) = sqlx::query(
         "SELECT address,created_at FROM wallet_addresses WHERE user_id=?1 ORDER BY created_at,id LIMIT 1",
     )
@@ -1128,7 +1136,7 @@ async fn confirm_deposit(
     headers: HeaderMap,
     Json(input): Json<DepositRequest>,
 ) -> Result<Json<DepositResponse>, ApiError> {
-    let user_id = require_fund_or_human_user(&state, &headers).await?;
+    let user_id = require_initialized_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
     let target = load_deposit_target(&state.db, &user_id, &input).await?;
     let verified = verify_deposit_receipt(&target, &input.transaction_hash).await?;
@@ -1160,7 +1168,7 @@ async fn claim_deposit(
     headers: HeaderMap,
     Json(input): Json<DepositClaimRequest>,
 ) -> Result<Json<DepositResponse>, ApiError> {
-    let user_id = require_fund_or_human_user(&state, &headers).await?;
+    let user_id = require_initialized_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
     let targets = load_deposit_targets_for_chain(&state.db, &user_id, input.chain_id).await?;
     let (target, verified) = verify_deposit_claim(targets, &input.transaction_hash).await?;
@@ -1318,7 +1326,7 @@ async fn discover_next_deposit(state: &AppState) -> Result<(), ApiError> {
 }
 
 async fn next_discovery_target(db: &SqlitePool) -> Result<Option<DiscoveryTarget>, ApiError> {
-    let row = sqlx::query("SELECT w.id,w.user_id,w.address,n.chain_id,COALESCE(c.next_block_number,0),COALESCE(c.last_seen_block_number,0) FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id CROSS JOIN evm_networks n LEFT JOIN deposit_discovery_cursors c ON c.wallet_address_id=w.id AND c.chain_id=n.chain_id WHERE n.enabled=1 ORDER BY CASE WHEN c.last_attempt_at IS NULL THEN 0 ELSE 1 END,c.last_attempt_at,w.created_at,w.id,n.chain_id LIMIT 1")
+    let row = sqlx::query("SELECT w.id,w.user_id,w.address,n.chain_id,COALESCE(c.next_block_number,0),COALESCE(c.last_seen_block_number,0) FROM wallet_addresses w JOIN users u ON u.id=w.user_id AND u.kind='human' JOIN wallet_private_keys k ON k.wallet_address_id=w.id CROSS JOIN evm_networks n LEFT JOIN deposit_discovery_cursors c ON c.wallet_address_id=w.id AND c.chain_id=n.chain_id WHERE n.enabled=1 ORDER BY CASE WHEN c.last_attempt_at IS NULL THEN 0 ELSE 1 END,c.last_attempt_at,w.created_at,w.id,n.chain_id LIMIT 1")
         .fetch_optional(db)
         .await
         .map_err(db_error)?;
@@ -1507,7 +1515,7 @@ async fn create_transfer(
     headers: HeaderMap,
     Json(input): Json<TransferRequest>,
 ) -> Result<Json<TransferResponse>, ApiError> {
-    let sender = require_fund_or_human_user(&state, &headers).await?;
+    let sender = require_internal_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
     if input.amount_usd_nanos <= 0 {
         return Err(ApiError::invalid(
@@ -1551,7 +1559,14 @@ async fn post_transfer(
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    provision_user_wallet_in_transaction(&mut tx, &input.recipient_user_id).await?;
+    let recipient_kind: String = sqlx::query_scalar("SELECT kind FROM users WHERE id=?1")
+        .bind(&input.recipient_user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    if recipient_kind == "human" {
+        provision_human_wallet_in_transaction(&mut tx, &input.recipient_user_id).await?;
+    }
     let outgoing_reference = format!("transfer:{transfer_id}:out");
     insert_ledger(
         &mut tx,
@@ -2832,7 +2847,7 @@ async fn list_admin_deposits(
     headers: HeaderMap,
 ) -> Result<Json<Vec<AdminDeposit>>, ApiError> {
     require_root(&state, &headers).await?;
-    let rows = sqlx::query("SELECT d.id,d.user_id,w.address,a.symbol,n.chain_id,n.name,e.amount_usd_nanos,d.transaction_hash,d.sweep_status,d.created_at,s.status,s.gas_transaction_hash,s.token_transaction_hash,s.error_message,s.updated_at FROM deposits d JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id JOIN ledger_entries e ON e.id=d.ledger_entry_id JOIN deposit_sweeps s ON s.deposit_id=d.id ORDER BY d.created_at DESC,d.id DESC LIMIT 100")
+    let rows = sqlx::query("SELECT d.id,d.user_id,w.address,a.symbol,n.chain_id,n.name,e.amount_usd_nanos,d.transaction_hash,d.sweep_status,d.created_at,s.status,s.gas_transaction_hash,s.token_transaction_hash,s.error_message,s.updated_at FROM deposits d JOIN users u ON u.id=d.user_id AND u.kind='human' JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id JOIN ledger_entries e ON e.id=d.ledger_entry_id JOIN deposit_sweeps s ON s.deposit_id=d.id ORDER BY d.created_at DESC,d.id DESC LIMIT 100")
         .fetch_all(&state.db)
         .await
         .map_err(db_error)?;
@@ -2868,7 +2883,7 @@ async fn list_admin_withdrawals(
     headers: HeaderMap,
 ) -> Result<Json<Vec<AdminWithdrawal>>, ApiError> {
     require_root(&state, &headers).await?;
-    let rows = sqlx::query("SELECT w.id,w.user_id,w.destination_address,a.symbol,n.chain_id,n.name,w.amount_usd_nanos,w.transaction_hash,w.signed_transaction,w.status,w.last_error,w.created_at FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id ORDER BY w.created_at DESC,w.id DESC LIMIT 100")
+    let rows = sqlx::query("SELECT w.id,w.user_id,w.destination_address,a.symbol,n.chain_id,n.name,w.amount_usd_nanos,w.transaction_hash,w.signed_transaction,w.status,w.last_error,w.created_at FROM withdrawals w JOIN users u ON u.id=w.user_id AND u.kind='human' JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id ORDER BY w.created_at DESC,w.id DESC LIMIT 100")
         .fetch_all(&state.db)
         .await
         .map_err(db_error)?;
@@ -2953,7 +2968,6 @@ async fn create_fund_user(
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    provision_user_wallet_in_transaction(&mut tx, &user_id).await?;
     sqlx::query("INSERT INTO fund_user_api_keys(user_id,api_key_hash,api_key_prefix,created_at,rotated_at) VALUES(?1,?2,?3,?4,?4)")
         .bind(&user_id)
         .bind(fund_user_api_key_hash(&api_key))
@@ -2996,20 +3010,6 @@ async fn rotate_fund_user_api_key(
     }))
 }
 
-async fn create_fund_user_withdrawal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(input): Json<WithdrawalRequest>,
-) -> Result<Json<WithdrawalResponse>, ApiError> {
-    require_root(&state, &headers).await?;
-    read_fund_user(&state.db, &id).await?;
-    let idempotency_key = idempotency_key(&headers)?;
-    Ok(Json(
-        post_withdrawal(&state, &id, &input, &idempotency_key).await?,
-    ))
-}
-
 async fn fund_user_ledger(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3021,7 +3021,7 @@ async fn fund_user_ledger(
 }
 
 async fn load_fund_users(db: &SqlitePool) -> Result<Vec<FundUser>, ApiError> {
-    let rows = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,w.address,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id JOIN wallet_addresses w ON w.user_id=u.id LEFT JOIN ledger_entries e ON e.user_id=u.id WHERE u.kind='fund' AND u.status='active' GROUP BY u.id,u.name,k.api_key_prefix,w.address,u.created_at ORDER BY u.created_at DESC,u.id DESC")
+    let rows = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id LEFT JOIN ledger_entries e ON e.user_id=u.id WHERE u.kind='fund' AND u.status='active' GROUP BY u.id,u.name,k.api_key_prefix,u.created_at ORDER BY u.created_at DESC,u.id DESC")
         .fetch_all(db)
         .await
         .map_err(db_error)?;
@@ -3029,7 +3029,7 @@ async fn load_fund_users(db: &SqlitePool) -> Result<Vec<FundUser>, ApiError> {
 }
 
 async fn read_fund_user(db: &SqlitePool, user_id: &str) -> Result<FundUser, ApiError> {
-    let row = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,w.address,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id JOIN wallet_addresses w ON w.user_id=u.id LEFT JOIN ledger_entries e ON e.user_id=u.id WHERE u.id=?1 AND u.kind='fund' AND u.status='active' GROUP BY u.id,u.name,k.api_key_prefix,w.address,u.created_at")
+    let row = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id LEFT JOIN ledger_entries e ON e.user_id=u.id WHERE u.id=?1 AND u.kind='fund' AND u.status='active' GROUP BY u.id,u.name,k.api_key_prefix,u.created_at")
         .bind(user_id)
         .fetch_optional(db)
         .await
@@ -3039,13 +3039,12 @@ async fn read_fund_user(db: &SqlitePool, user_id: &str) -> Result<FundUser, ApiE
 }
 
 fn fund_user(row: sqlx::sqlite::SqliteRow) -> FundUser {
-    let available_usd_nanos: i64 = row.get(5);
+    let available_usd_nanos: i64 = row.get(4);
     FundUser {
         id: row.get(0),
         name: row.get(1),
         api_key_prefix: row.get(2),
-        wallet_address: row.get(3),
-        created_at: row.get(4),
+        created_at: row.get(3),
         available_usd_nanos,
         available_usd: format_usd(available_usd_nanos),
     }
@@ -3228,7 +3227,7 @@ async fn retry_sweep(
 async fn submit_sweep(state: &AppState, deposit_id: &str) -> Result<(), ApiError> {
     let _sweep = state.sweep_lock.lock().await;
     let status: Option<String> =
-        sqlx::query_scalar("SELECT sweep_status FROM deposits WHERE id=?1")
+        sqlx::query_scalar("SELECT d.sweep_status FROM deposits d JOIN users u ON u.id=d.user_id AND u.kind='human' WHERE d.id=?1")
             .bind(deposit_id)
             .fetch_optional(&state.db)
             .await
@@ -3240,7 +3239,7 @@ async fn submit_sweep(state: &AppState, deposit_id: &str) -> Result<(), ApiError
 }
 
 async fn submit_sweep_locked(state: &AppState, deposit_id: &str) -> Result<(), ApiError> {
-    let row = sqlx::query("SELECT d.asset_id,d.raw_amount,w.address,k.private_key,a.contract_address,n.rpc_url,n.chain_id FROM deposits d JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN wallet_private_keys k ON k.wallet_address_id=w.id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE d.id=?1")
+    let row = sqlx::query("SELECT d.asset_id,d.raw_amount,w.address,k.private_key,a.contract_address,n.rpc_url,n.chain_id FROM deposits d JOIN users u ON u.id=d.user_id AND u.kind='human' JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN wallet_private_keys k ON k.wallet_address_id=w.id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE d.id=?1")
         .bind(deposit_id)
         .fetch_optional(&state.db)
         .await
@@ -3342,7 +3341,7 @@ async fn submit_sweep_locked(state: &AppState, deposit_id: &str) -> Result<(), A
 
 async fn require_retryable_sweep(db: &SqlitePool, deposit_id: &str) -> Result<(), ApiError> {
     let status: Option<String> =
-        sqlx::query_scalar("SELECT sweep_status FROM deposits WHERE id=?1")
+        sqlx::query_scalar("SELECT d.sweep_status FROM deposits d JOIN users u ON u.id=d.user_id AND u.kind='human' WHERE d.id=?1")
             .bind(deposit_id)
             .fetch_optional(db)
             .await
@@ -3417,7 +3416,7 @@ fn spawn_withdrawal_submission(state: AppState, withdrawal_id: String) {
 fn resume_submitted_withdrawals(state: AppState) {
     tokio::spawn(async move {
         let ids: Result<Vec<String>, _> = sqlx::query_scalar(
-            "SELECT id FROM withdrawals WHERE status='submitted' AND transaction_hash IS NOT NULL",
+            "SELECT w.id FROM withdrawals w JOIN users u ON u.id=w.user_id AND u.kind='human' WHERE w.status='submitted' AND w.transaction_hash IS NOT NULL",
         )
         .fetch_all(&state.db)
         .await;
@@ -3731,7 +3730,7 @@ async fn load_user_deposit_wallet(
     db: &SqlitePool,
     user_id: &str,
 ) -> Result<(String, String), ApiError> {
-    let row = sqlx::query("SELECT w.id,w.address FROM wallet_addresses w JOIN wallet_private_keys k ON k.wallet_address_id=w.id WHERE w.user_id=?1 ORDER BY w.created_at,w.id LIMIT 1")
+    let row = sqlx::query("SELECT w.id,w.address FROM wallet_addresses w JOIN users u ON u.id=w.user_id AND u.kind='human' JOIN wallet_private_keys k ON k.wallet_address_id=w.id WHERE w.user_id=?1 ORDER BY w.created_at,w.id LIMIT 1")
         .bind(user_id)
         .fetch_optional(db)
         .await
@@ -3896,7 +3895,7 @@ async fn load_withdrawal_target(
     id: &str,
     user_id: Option<&str>,
 ) -> Result<WithdrawalTarget, ApiError> {
-    let row = sqlx::query("SELECT a.contract_address,n.rpc_url,n.chain_id,w.destination_address,w.amount_usd_nanos,a.token_decimals,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE w.id=?1")
+    let row = sqlx::query("SELECT a.contract_address,n.rpc_url,n.chain_id,w.destination_address,w.amount_usd_nanos,a.token_decimals,w.transaction_hash,w.status FROM withdrawals w JOIN users u ON u.id=w.user_id AND u.kind='human' JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE w.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
@@ -4280,10 +4279,7 @@ fn chain_error(error: impl std::fmt::Display) -> ApiError {
     )
 }
 
-async fn require_fund_or_human_user(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<String, ApiError> {
+async fn require_internal_user(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     if headers.contains_key("x-api-key") {
         return require_fund_user_api_key(state, fund_user_api_key(headers)?).await;
     }
@@ -4342,7 +4338,7 @@ async fn require_initialized_user(
         return Err(ApiError::not_configured());
     }
     let user_id = require_user(state, headers).await?;
-    ensure_user_wallet(state, &user_id).await?;
+    ensure_human_user_wallet(state, &user_id).await?;
     Ok(user_id)
 }
 
@@ -4448,6 +4444,7 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS users_kind_created_idx ON users(kind, created_at DESC, id DESC)")
         .execute(db)
         .await?;
+    remove_fund_user_wallet_keys(db).await?;
     if !table_has_column(db, "supported_assets", "token_decimals").await? {
         sqlx::query(
             "ALTER TABLE supported_assets ADD COLUMN token_decimals INTEGER NOT NULL DEFAULT 6",
@@ -4476,6 +4473,24 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     seed_builtin_evm(db).await?;
     migrate_legacy_custody_wallet(db).await?;
+    Ok(())
+}
+
+async fn remove_fund_user_wallet_keys(db: &SqlitePool) -> anyhow::Result<()> {
+    let fund_wallets =
+        "SELECT w.id FROM wallet_addresses w JOIN users u ON u.id=w.user_id WHERE u.kind='fund'";
+    let mut tx = db.begin().await?;
+    sqlx::query(&format!(
+        "DELETE FROM deposit_discovery_cursors WHERE wallet_address_id IN ({fund_wallets})"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(&format!(
+        "DELETE FROM wallet_private_keys WHERE wallet_address_id IN ({fund_wallets})"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -5176,8 +5191,8 @@ mod tests {
             .await
             .unwrap();
 
-        let first = provision_user_wallet(&db, &user_id).await.unwrap();
-        let second = provision_user_wallet(&db, &user_id).await.unwrap();
+        let first = provision_human_wallet(&db, &user_id).await.unwrap();
+        let second = provision_human_wallet(&db, &user_id).await.unwrap();
         assert_eq!(first.address, second.address);
         assert!(
             serde_json::to_value(first)
@@ -5537,7 +5552,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        provision_user_wallet(&db, &user_id).await.unwrap();
+        provision_human_wallet(&db, &user_id).await.unwrap();
         let wallet_id: String =
             sqlx::query_scalar("SELECT id FROM wallet_addresses WHERE user_id=?1")
                 .bind(&user_id)
@@ -6107,7 +6122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fund_user_has_its_own_wallet_key_and_transfer_ledger() {
+    async fn fund_user_is_internal_only_and_uses_transfer_ledger() {
         let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
         let db = open_db(&path).await.unwrap();
         migrate(&db).await.unwrap();
@@ -6128,7 +6143,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        provision_user_wallet(&db, &fund_user_id).await.unwrap();
+        provision_human_wallet(&db, &manager_user_id).await.unwrap();
         sqlx::query("INSERT INTO fund_user_api_keys(user_id,api_key_hash,api_key_prefix,created_at,rotated_at) VALUES(?1,?2,'midas_fund_test',?3,?3)")
             .bind(&fund_user_id)
             .bind(fund_user_api_key_hash(&api_key))
@@ -6138,7 +6153,7 @@ mod tests {
             .unwrap();
         sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment','posted',2000000,2000000,?3)")
             .bind(Uuid::new_v4().to_string())
-            .bind(&fund_user_id)
+            .bind(&manager_user_id)
             .bind(&now)
             .execute(&db)
             .await
@@ -6146,8 +6161,19 @@ mod tests {
 
         let fund = read_fund_user(&db, &fund_user_id).await.unwrap();
         assert_eq!(fund.name, "1Exchange Settlement");
-        assert_eq!(fund.available_usd_nanos, 2_000_000);
-        assert!(fund.wallet_address.starts_with("0x"));
+        assert_eq!(fund.available_usd_nanos, 0);
+        match provision_human_wallet(&db, &fund_user_id).await {
+            Err(error) => assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY),
+            Ok(_) => panic!("fund users must not receive EVM deposit wallets"),
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallet_addresses WHERE user_id=?1")
+                .bind(&fund_user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            0
+        );
         assert_eq!(
             fund_user_id_for_api_key(&db, &api_key).await.unwrap(),
             fund_user_id
@@ -6172,11 +6198,11 @@ mod tests {
 
         let transfer = post_transfer(
             &db,
-            &fund_user_id,
+            &manager_user_id,
             &TransferRequest {
-                recipient_user_id: recipient_user_id.clone(),
+                recipient_user_id: fund_user_id.clone(),
                 amount_usd_nanos: 750_000,
-                note: Some("1ex:midas:out:test".to_string()),
+                note: Some("1ex:midas:in:test".to_string()),
             },
             "fund-user-transfer",
         )
@@ -6184,9 +6210,9 @@ mod tests {
         .unwrap();
         let retry = post_transfer(
             &db,
-            &fund_user_id,
+            &manager_user_id,
             &TransferRequest {
-                recipient_user_id: recipient_user_id.clone(),
+                recipient_user_id: fund_user_id.clone(),
                 amount_usd_nanos: 750_000,
                 note: Some("ignored after idempotency".to_string()),
             },
@@ -6196,14 +6222,117 @@ mod tests {
         .unwrap();
         assert_eq!(transfer.id, retry.id);
         assert_eq!(
-            available_balance(&db, &fund_user_id).await.unwrap(),
+            available_balance(&db, &manager_user_id).await.unwrap(),
             1_250_000
         );
         assert_eq!(
-            available_balance(&db, &recipient_user_id).await.unwrap(),
+            available_balance(&db, &fund_user_id).await.unwrap(),
             750_000
         );
+        post_transfer(
+            &db,
+            &fund_user_id,
+            &TransferRequest {
+                recipient_user_id: recipient_user_id.clone(),
+                amount_usd_nanos: 500_000,
+                note: Some("1ex:midas:out:test".to_string()),
+            },
+            "fund-user-payout",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            available_balance(&db, &fund_user_id).await.unwrap(),
+            250_000
+        );
+        assert_eq!(
+            available_balance(&db, &recipient_user_id).await.unwrap(),
+            500_000
+        );
         assert_eq!(load_user_ledger(&db, &fund_user_id).await.unwrap().len(), 2);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallet_addresses WHERE user_id=?1")
+                .bind(&fund_user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn migration_removes_existing_fund_user_wallet_keys() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let manager_user_id = Uuid::new_v4().to_string();
+        let fund_user_id = Uuid::new_v4().to_string();
+        let wallet_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&manager_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users(id,kind,name,manager_user_id,status,created_at) VALUES(?1,'fund','Legacy fund',?2,'active',?3)")
+            .bind(&fund_user_id)
+            .bind(&manager_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO wallet_addresses(id,user_id,chain_id,address,custody_status,created_at) VALUES(?1,?2,?3,'0x0000000000000000000000000000000000000001','configured',?4)")
+            .bind(&wallet_id)
+            .bind(&fund_user_id)
+            .bind(EVM_ADDRESS_SENTINEL_CHAIN_ID)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO wallet_private_keys(wallet_address_id,private_key,created_at) VALUES(?1,'0x01',?2)")
+            .bind(&wallet_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO deposit_discovery_cursors(wallet_address_id,chain_id,next_block_number,last_seen_block_number,updated_at) VALUES(?1,1,0,0,?2)")
+            .bind(&wallet_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        migrate(&db).await.unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallet_addresses WHERE user_id=?1")
+                .bind(&fund_user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM wallet_private_keys WHERE wallet_address_id=?1"
+            )
+            .bind(&wallet_id)
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM deposit_discovery_cursors WHERE wallet_address_id=?1"
+            )
+            .bind(&wallet_id)
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            0
+        );
         let _ = std::fs::remove_file(path);
     }
 }
