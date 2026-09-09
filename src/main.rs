@@ -692,6 +692,14 @@ struct PaymentAgreementBinding {
 struct PaymentAgreementChargeInput {
     user_id: String,
     amount_usd_nanos: i64,
+    reference: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PaymentAgreementPayoutInput {
+    user_id: String,
+    amount_usd_nanos: i64,
+    reference: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -707,6 +715,18 @@ struct PaymentAgreementCharge {
     owner_user_id: String,
     amount_usd_nanos: i64,
     amount_usd: String,
+    created_at: String,
+}
+
+#[derive(Serialize, Debug)]
+struct PaymentAgreementPayout {
+    id: String,
+    agreement_id: String,
+    recipient_user_id: String,
+    owner_user_id: String,
+    amount_usd_nanos: i64,
+    amount_usd: String,
+    reference: Option<String>,
     created_at: String,
 }
 
@@ -841,6 +861,7 @@ fn app(state: AppState) -> Router {
             post(payment_agreement_charge_summary),
         )
         .route("/agreements/:id/charges", post(charge_payment_agreement))
+        .route("/agreements/:id/payouts", post(payout_payment_agreement))
         .route(
             "/admin/evm-config",
             get(read_evm_config).put(write_evm_config),
@@ -1864,6 +1885,7 @@ async fn charge_payment_agreement(
     }
     Uuid::parse_str(&input.user_id)
         .map_err(|_| ApiError::invalid("user_id must be an Auth Mini UUID"))?;
+    let reference = payment_agreement_reference(input.reference.as_deref())?;
     let agreement = read_payment_agreement_for_api_key(&state.db, &id, api_key).await?;
     let _write = state.write_lock.lock().await;
     Ok(Json(
@@ -1872,6 +1894,38 @@ async fn charge_payment_agreement(
             &agreement,
             &input.user_id,
             input.amount_usd_nanos,
+            reference.as_deref(),
+            &idempotency_key,
+        )
+        .await?,
+    ))
+}
+
+async fn payout_payment_agreement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<PaymentAgreementPayoutInput>,
+) -> Result<Json<PaymentAgreementPayout>, ApiError> {
+    let api_key = payment_agreement_api_key(&headers)?;
+    let idempotency_key = idempotency_key(&headers)?;
+    if input.amount_usd_nanos <= 0 {
+        return Err(ApiError::invalid(
+            "automatic payout amount must be greater than zero",
+        ));
+    }
+    Uuid::parse_str(&input.user_id)
+        .map_err(|_| ApiError::invalid("user_id must be an Auth Mini UUID"))?;
+    let reference = payment_agreement_reference(input.reference.as_deref())?;
+    let agreement = read_payment_agreement_for_api_key(&state.db, &id, api_key).await?;
+    let _write = state.write_lock.lock().await;
+    Ok(Json(
+        post_payment_agreement_payout(
+            &state.db,
+            &agreement,
+            &input.user_id,
+            input.amount_usd_nanos,
+            reference.as_deref(),
             &idempotency_key,
         )
         .await?,
@@ -1899,6 +1953,7 @@ async fn post_payment_agreement_charge(
     agreement: &PaymentAgreement,
     payer_user_id: &str,
     amount_usd_nanos: i64,
+    reference: Option<&str>,
     idempotency_key: &str,
 ) -> Result<PaymentAgreementCharge, ApiError> {
     let existing: Option<String> = sqlx::query_scalar(
@@ -1932,7 +1987,7 @@ async fn post_payment_agreement_charge(
     let payer_ledger_id = Uuid::new_v4().to_string();
     let owner_ledger_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let note = format!("Automatic charge: {}", agreement.name);
+    let note = payment_agreement_ledger_note("Automatic charge", &agreement.name, reference);
     let payer_reference = format!("agreement:{charge_id}:out");
     let owner_reference = format!("agreement:{charge_id}:in");
     let mut tx = db.begin().await.map_err(db_error)?;
@@ -1984,6 +2039,121 @@ async fn post_payment_agreement_charge(
         .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
     read_payment_agreement_charge(db, &charge_id).await
+}
+
+async fn post_payment_agreement_payout(
+    db: &SqlitePool,
+    agreement: &PaymentAgreement,
+    recipient_user_id: &str,
+    amount_usd_nanos: i64,
+    reference: Option<&str>,
+    idempotency_key: &str,
+) -> Result<PaymentAgreementPayout, ApiError> {
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM payment_agreement_payouts WHERE agreement_id=?1 AND idempotency_key=?2",
+    )
+    .bind(&agreement.id)
+    .bind(idempotency_key)
+    .fetch_optional(db)
+    .await
+    .map_err(db_error)?;
+    if let Some(existing) = existing {
+        return read_payment_agreement_payout(db, &existing).await;
+    }
+    let bound: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM payment_agreement_bindings WHERE agreement_id=?1 AND user_id=?2)")
+        .bind(&agreement.id)
+        .bind(recipient_user_id)
+        .fetch_one(db)
+        .await
+        .map_err(db_error)?;
+    if !bound {
+        return Err(ApiError::conflict(
+            "this user has not authorized the automatic payment channel",
+        ));
+    }
+    if available_balance(db, &agreement.owner_user_id).await? < amount_usd_nanos {
+        return Err(ApiError::conflict(
+            "the payment channel owner's available USD balance is insufficient",
+        ));
+    }
+    let payout_id = Uuid::new_v4().to_string();
+    let owner_ledger_id = Uuid::new_v4().to_string();
+    let recipient_ledger_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let note = payment_agreement_ledger_note("Automatic payout", &agreement.name, reference);
+    let owner_reference = format!("agreement_payout:{payout_id}:out");
+    let recipient_reference = format!("agreement_payout:{payout_id}:in");
+    let mut tx = db.begin().await.map_err(db_error)?;
+    insert_ledger(
+        &mut tx,
+        LedgerInsert {
+            id: &owner_ledger_id,
+            user_id: &agreement.owner_user_id,
+            kind: "transfer_out",
+            status: "posted",
+            asset_id: None,
+            amount_usd_nanos,
+            balance_delta_usd_nanos: -amount_usd_nanos,
+            counterparty_user_id: Some(recipient_user_id),
+            external_reference: Some(&owner_reference),
+            note: Some(&note),
+            now: &now,
+        },
+    )
+    .await?;
+    insert_ledger(
+        &mut tx,
+        LedgerInsert {
+            id: &recipient_ledger_id,
+            user_id: recipient_user_id,
+            kind: "transfer_in",
+            status: "posted",
+            asset_id: None,
+            amount_usd_nanos,
+            balance_delta_usd_nanos: amount_usd_nanos,
+            counterparty_user_id: Some(&agreement.owner_user_id),
+            external_reference: Some(&recipient_reference),
+            note: Some(&note),
+            now: &now,
+        },
+    )
+    .await?;
+    sqlx::query("INSERT INTO payment_agreement_payouts(id,agreement_id,recipient_user_id,amount_usd_nanos,owner_ledger_entry_id,recipient_ledger_entry_id,idempotency_key,reference,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)")
+        .bind(&payout_id)
+        .bind(&agreement.id)
+        .bind(recipient_user_id)
+        .bind(amount_usd_nanos)
+        .bind(&owner_ledger_id)
+        .bind(&recipient_ledger_id)
+        .bind(idempotency_key)
+        .bind(reference)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+    read_payment_agreement_payout(db, &payout_id).await
+}
+
+fn payment_agreement_reference(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.chars().count() > 120 || value.chars().any(char::is_control))
+    {
+        return Err(ApiError::invalid(
+            "payment reference must contain at most 120 visible characters",
+        ));
+    }
+    Ok(value.map(str::to_string))
+}
+
+fn payment_agreement_ledger_note(
+    kind: &str,
+    agreement_name: &str,
+    reference: Option<&str>,
+) -> String {
+    reference
+        .map(|reference| format!("{kind}: {agreement_name} · {reference}"))
+        .unwrap_or_else(|| format!("{kind}: {agreement_name}"))
 }
 
 fn payment_agreement_summary_user_ids(values: Vec<String>) -> Result<Vec<String>, ApiError> {
@@ -2128,6 +2298,29 @@ async fn read_payment_agreement_charge(
         amount_usd_nanos,
         amount_usd: format_usd(amount_usd_nanos),
         created_at: row.get(5),
+    })
+}
+
+async fn read_payment_agreement_payout(
+    db: &SqlitePool,
+    id: &str,
+) -> Result<PaymentAgreementPayout, ApiError> {
+    let row = sqlx::query("SELECT p.id,p.agreement_id,p.recipient_user_id,a.owner_user_id,p.amount_usd_nanos,p.reference,p.created_at FROM payment_agreement_payouts p JOIN payment_agreements a ON a.id=p.agreement_id WHERE p.id=?1")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "automatic payout was not recorded"))?;
+    let amount_usd_nanos: i64 = row.get(4);
+    Ok(PaymentAgreementPayout {
+        id: row.get(0),
+        agreement_id: row.get(1),
+        recipient_user_id: row.get(2),
+        owner_user_id: row.get(3),
+        amount_usd_nanos,
+        amount_usd: format_usd(amount_usd_nanos),
+        reference: row.get(5),
+        created_at: row.get(6),
     })
 }
 
@@ -5418,6 +5611,7 @@ mod tests {
             &agreement,
             &payer_user_id,
             750_000,
+            Some("1ex:cash:charge"),
             "billing-cycle-2026-09",
         )
         .await
@@ -5427,6 +5621,7 @@ mod tests {
             &agreement,
             &payer_user_id,
             750_000,
+            Some("1ex:cash:charge"),
             "billing-cycle-2026-09",
         )
         .await
@@ -5488,11 +5683,130 @@ mod tests {
             &agreement,
             &payer_user_id,
             1,
+            None,
             "billing-cycle-2026-10",
         )
         .await
         .unwrap_err();
         assert_eq!(rejected.status, StatusCode::CONFLICT);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn automatic_payment_payout_is_idempotent_and_posts_a_balanced_pair() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let owner_user_id = Uuid::new_v4().to_string();
+        let recipient_user_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1),(?2)")
+            .bind(&owner_user_id)
+            .bind(&recipient_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment','posted',2000000,2000000,?3)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&owner_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        let agreement = PaymentAgreement {
+            id: Uuid::new_v4().to_string(),
+            owner_user_id: owner_user_id.clone(),
+            name: "1Exchange USD".to_string(),
+            api_key_prefix: "midas_agreement_test".to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        sqlx::query("INSERT INTO payment_agreements(id,owner_user_id,name,api_key_hash,api_key_prefix,created_at,updated_at) VALUES(?1,?2,?3,'hash',?4,?5,?5)")
+            .bind(&agreement.id)
+            .bind(&agreement.owner_user_id)
+            .bind(&agreement.name)
+            .bind(&agreement.api_key_prefix)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO payment_agreement_bindings(agreement_id,user_id,created_at) VALUES(?1,?2,?3)")
+            .bind(&agreement.id)
+            .bind(&recipient_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let unbound = post_payment_agreement_payout(
+            &db,
+            &agreement,
+            &Uuid::new_v4().to_string(),
+            1,
+            None,
+            "cash-out-unbound",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unbound.status, StatusCode::CONFLICT);
+        let insufficient = post_payment_agreement_payout(
+            &db,
+            &agreement,
+            &recipient_user_id,
+            2_000_001,
+            None,
+            "cash-out-insufficient",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(insufficient.status, StatusCode::CONFLICT);
+
+        let payout = post_payment_agreement_payout(
+            &db,
+            &agreement,
+            &recipient_user_id,
+            750_000,
+            Some("1ex:cash:out"),
+            "cash-out-2026-09",
+        )
+        .await
+        .unwrap();
+        let retry = post_payment_agreement_payout(
+            &db,
+            &agreement,
+            &recipient_user_id,
+            750_000,
+            Some("1ex:cash:out"),
+            "cash-out-2026-09",
+        )
+        .await
+        .unwrap();
+        assert_eq!(payout.id, retry.id);
+        assert_eq!(payout.reference.as_deref(), Some("1ex:cash:out"));
+        assert_eq!(
+            available_balance(&db, &owner_user_id).await.unwrap(),
+            1_250_000
+        );
+        assert_eq!(
+            available_balance(&db, &recipient_user_id).await.unwrap(),
+            750_000
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM payment_agreement_payouts")
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM ledger_entries WHERE note LIKE 'Automatic payout: 1Exchange USD · 1ex:cash:out'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            2
+        );
         let _ = std::fs::remove_file(path);
     }
 }

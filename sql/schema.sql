@@ -193,6 +193,22 @@ CREATE TABLE IF NOT EXISTS payment_agreement_charges (
   UNIQUE(agreement_id, idempotency_key)
 );
 
+-- Payouts mirror charges in the reverse direction. They are intentionally
+-- ledger-only: an integration can return a customer's Midas USD balance but
+-- cannot request an on-chain withdrawal or choose an EVM destination.
+CREATE TABLE IF NOT EXISTS payment_agreement_payouts (
+  id TEXT PRIMARY KEY,
+  agreement_id TEXT NOT NULL REFERENCES payment_agreements(id),
+  recipient_user_id TEXT NOT NULL REFERENCES users(id),
+  amount_usd_nanos INTEGER NOT NULL CHECK (amount_usd_nanos > 0),
+  owner_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  recipient_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  idempotency_key TEXT NOT NULL,
+  reference TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(agreement_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS withdrawals (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
@@ -228,3 +244,5 @@ CREATE INDEX IF NOT EXISTS payment_agreements_owner_created_idx
   ON payment_agreements(owner_user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS payment_agreement_bindings_user_created_idx
   ON payment_agreement_bindings(user_id, created_at DESC, agreement_id);
+CREATE INDEX IF NOT EXISTS payment_agreement_payouts_recipient_created_idx
+  ON payment_agreement_payouts(recipient_user_id, created_at DESC, id DESC);

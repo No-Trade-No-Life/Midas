@@ -124,7 +124,8 @@ const automaticChargeCurl = `curl --request POST \\
   --header 'Idempotency-Key: invoice-20260906-001' \\
   --data '{
     "user_id": "$PAYER_USER_ID",
-    "amount_usd_nanos": 12990000000
+    "amount_usd_nanos": 12990000000,
+    "reference": "1ex:cash:9b0f6b3c"
   }'`
 
 const fallbackConfig: AuthConfig = { auth_mini_base_url: "https://auth.ntnl.io", audiences: ["midas.ntnl.io", "linkit.ntnl.io"], linkit_base_url: "https://linkit.ntnl.io" }
