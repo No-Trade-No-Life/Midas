@@ -7,7 +7,7 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 ## Users and jobs
 
 - A customer opens Midas on a phone, finds their dedicated EVM deposit address, sends a supported stablecoin, checks the USD balance after automatic discovery, can claim a missed deposit by network and TxID, transfers to another Midas user, withdraws, and reviews their immutable history.
-- A root operator can create a fund user for an integrating application such as 1Exchange or OpenAI LB. A fund user has its own EVM deposit address, USD balance, and immutable ledger, and its API key can read its balance, ledger, and address, confirm its own deposit, and create internal transfers using idempotency keys.
+- A root operator can create a fund user for an integrating application such as 1Exchange or OpenAI LB. A fund user has a transferable Midas user ID, USD balance, and immutable ledger, but no EVM address or blockchain operations; its API key can read its balance and ledger and create internal transfers using idempotency keys.
 - A channel owner creates an automatic-payment agreement, then explicitly rotates its API key and receives that value once. Any Midas user, including the owner, signs in to a focused authorization page before the channel can charge that user's available balance.
 - The root operator initializes the instance once, sets supported EVM networks/assets, and configures the gas and collection wallets without exposing their private keys through read APIs.
 
@@ -19,13 +19,13 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 - Transfers are paired, immutable USD ledger entries and use Linkit's username picker. Withdrawals select a chain and USDC/USDT, reserve the available USD balance, accept a direct same-chain EVM destination, and broadcast only when the custody signer exists. The user can then save that destination from its history.
 - Broadcast withdrawal destinations are grouped by exact address, network, and token. The user may save a note for each target and select it again in the withdrawal drawer.
 - Automatic-payment charges use a channel-scoped idempotency key, require a currently bound payer, and create a paired immutable `transfer_out` / `transfer_in` ledger entry. The API key is stored only as a hash; rotation immediately invalidates its predecessor and displays the replacement once.
-- Fund users reuse the `users` ledger principal with `kind = fund`; they are not Auth Mini identities. Their API key is tied to exactly one fund user and cannot alter custody configuration or act as any human user. Root GUI may initiate an on-chain withdrawal from that fund user's own balance; the API key cannot.
+- Fund users reuse the `users` ledger principal with `kind = fund`; they are not Auth Mini identities. Their API key is tied to exactly one fund user and cannot alter custody configuration, access EVM operations, or act as any human user. Fund users can move USD only through Midas internal transfers.
 
 ## Trust and operational boundary
 
-- Midas is custodial. Dedicated-address keys and one custody private key are persisted in SQLite but are never returned by an API. The custody address is derived from its private key; the service account is the only account permitted to read the database directory.
+- Midas is custodial for human users. Dedicated human-address keys and one custody private key are persisted in SQLite but are never returned by an API. Fund users do not receive deposit keys; legacy fund-user keys are removed by migration. The custody address is derived from its private key; the service account is the only account permitted to read the database directory.
 - Root configuration is protected by `app_meta.root_user_id`; changing it is not an application feature.
-- Root GUI management creates fund users, displays their non-secret API key prefix, balance, deposit address, and ledger, and rotates their API key. The key is returned once and never persisted in plaintext.
+- Root GUI management creates fund users, displays their transferable Midas user ID, non-secret API key prefix, balance, and ledger, and rotates their API key. The key is returned once and never persisted in plaintext.
 - A transaction is never credited from a client-provided amount. Midas derives asset, recipient, and amount from the final on-chain receipt.
 
 ## Platform and UI

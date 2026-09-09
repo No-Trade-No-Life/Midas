@@ -6,15 +6,15 @@
 
 - Rust/Axum API with SQLite **WAL** persistence.
 - Exact USD nanodollar ledger (`amount_usd_nanos` / `balance_delta_usd_nanos`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD nanodollars.
-- One persisted dedicated EVM-compatible deposit key/address per user, automatically created after initialization; private material is never returned from an API.
+- One persisted dedicated EVM-compatible deposit key/address per human user, automatically created after initialization; private material is never returned from an API.
 - Automatic receipt-driven deposits: Midas scans a bounded RPC `Transfer`-log range for one deposit-address/network pair per second and persists its cursor. It verifies every candidate's ERC-20 receipt through the chain RPC, credits USD, and submits the gas-funding and source-wallet collection sequence. Customers can also submit a network and TxID to verify and claim a missed deposit; the token and amount are always derived from the receipt.
-- Atomic internal transfers that automatically provision a new recipient's Midas account and dedicated wallet, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
+- Atomic internal transfers that automatically provision a new human recipient's Midas account and dedicated wallet, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
 - One-time `app_meta.root_user_id` bootstrap plus a root-only, input-only custody-wallet private key. Its address is derived server-side and the same wallet funds gas, collects deposits, and signs withdrawals.
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary with automatic redirect to sign-in; Midas has no unauthenticated home page.
 - A scannable QR code for the dedicated deposit address.
 - Linkit React Components, including the zero-prop `LinkitMyInfo` account control and `LinkitUserPicker` for username-based transfer recipients.
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
-- Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has its own dedicated deposit wallet, balance, immutable history, and one-time API key for safe API operations and internal transfers.
+- Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has no EVM wallet or blockchain API surface: its transferable Midas user ID, balance, immutable history, and one-time API key are for internal transfers only.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
 - Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page. Its API key can then make idempotent USD charges and ledger-only payouts against authorized users. A payout returns USD from the channel owner to the user and never requests an on-chain withdrawal.
 - OpenAPI contract and CI foundation.
@@ -36,7 +36,7 @@ Axum API
 
 Midas records **USD only** in integer nanodollars. Future USDC/USDT chain metadata is retained alongside ledger entries, but no token amount is treated as the system-of-record balance.
 
-Existing SQLite databases migrate on the first startup that carries this version. The migration atomically renames every persisted `*_usd_micros` column, multiplies its historical values by 1,000, verifies that no value can overflow `i64`, and records the `nanodollars` unit marker so it cannot run twice.
+Existing SQLite databases migrate on the first startup that carries this version. The USD-unit migration atomically renames every persisted `*_usd_micros` column, multiplies its historical values by 1,000, verifies that no value can overflow `i64`, and records the `nanodollars` unit marker so it cannot run twice. The startup migration also removes any legacy fund-user deposit private keys and discovery cursors.
 
 | Table | Purpose |
 | --- | --- |
@@ -45,9 +45,9 @@ Existing SQLite databases migrate on the first startup that carries this version
 | `fund_user_api_keys` | One-way API-key hash and non-secret prefix for each fund user |
 | `evm_networks` | Seeded built-in chain metadata with verified RPC URLs |
 | `supported_assets` | Seeded USDC / USDT contract and decimal metadata |
-| `wallet_addresses` | One user EVM-compatible deposit address (legacy chain field is an internal sentinel) |
-| `wallet_private_keys` | Dedicated EVM deposit private keys; readable only by the service account |
-| `deposit_discovery_cursors` | Durable bounded-RPC-scan cursor per deposit address and chain |
+| `wallet_addresses` | One human-user EVM-compatible deposit address (legacy chain field is an internal sentinel) |
+| `wallet_private_keys` | Dedicated human-user EVM deposit private keys; readable only by the service account |
+| `deposit_discovery_cursors` | Durable bounded-RPC-scan cursor per human deposit address and chain |
 | `ledger_entries` | Immutable USD balance deltas and payment history |
 | `payment_operations` | Per-user idempotency keys for payment writes |
 | `deposits`, `deposit_sweeps` | Confirmed deposits and the two-step collection state |
@@ -98,11 +98,10 @@ POST /api/agreements/{id}/api-key
 
 A root operator creates and rotates fund users through `POST /api/admin/fund-users`
 and `POST /api/admin/fund-users/{id}/api-key`. The plaintext key is returned once.
-With `X-Api-Key`, a fund user may call `GET /api/assets`, `GET /api/balances/me`,
-`GET /api/ledger/me`, `GET /api/wallet-addresses/me`, `POST /api/deposits/confirm`,
-`POST /api/deposits/claim`, and `POST /api/transfers`. It always acts as that fund
-user. Fund API keys cannot request on-chain withdrawals or modify root settings;
-the root GUI can initiate a withdrawal from the fund user's own balance.
+With `X-Api-Key`, a fund user may call `GET /api/balances/me`, `GET /api/ledger/me`,
+and `POST /api/transfers`. It always acts as that fund user. Fund API keys cannot
+access EVM assets, deposit addresses, deposit verification, withdrawals, or root
+settings; the root GUI cannot request an on-chain withdrawal for a fund user.
 
 An external payment channel uses its owner-rotated `X-Api-Key` and an
 `Idempotency-Key` for `POST /api/agreements/{id}/charges` and

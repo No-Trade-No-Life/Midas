@@ -15,10 +15,10 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- A fund user is an application-owned Midas principal. It reuses the same
--- wallet, ledger, and transfer tables as a human user, but has no Auth Mini
--- sign-in identity. Its one-time API key is stored as a hash and can only act
--- as this fund user; it is never accepted for EVM withdrawals or root setup.
+-- A fund user is an application-owned Midas principal. It reuses the ledger
+-- and internal-transfer tables as a human user, but has neither an EVM wallet
+-- nor an Auth Mini sign-in identity. Its one-time API key is stored as a hash
+-- and can act only as this fund user for internal Midas operations.
 CREATE TABLE IF NOT EXISTS fund_user_api_keys (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   api_key_hash TEXT NOT NULL UNIQUE,
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS wallet_addresses (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
   -- Retained as an internal migration sentinel. An EVM address is reusable on
-  -- every supported chain, so Midas stores one address per user, not per chain.
+  -- every supported chain, so Midas stores one address per human user, not per chain.
   chain_id INTEGER NOT NULL REFERENCES evm_networks(chain_id),
   address TEXT NOT NULL,
   custody_status TEXT NOT NULL DEFAULT 'configured' CHECK (custody_status = 'configured'),
