@@ -13,9 +13,10 @@ info:
     Human users authenticate with an Auth Mini bearer token. A root-created
     fund user has an internal USD balance, transferable Midas user ID, and
     immutable ledger, but no EVM wallet or blockchain operation. Its X-Api-Key
-    can read that balance and ledger and create internal transfers only. Every
-    payment write requires an Idempotency-Key. Automatic-payment channels remain
-    a separate human consent mechanism for backwards-compatible recurring charges.
+    can read that balance and ledger, create internal transfers, and aggregate
+    transfers sent to that fund user. Every payment write requires an
+    Idempotency-Key. Automatic-payment channels remain a separate human consent
+    mechanism for backwards-compatible recurring charges.
 servers:
   - url: https://midas.ntnl.io/api
 security:
@@ -72,6 +73,38 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/LedgerEntry' }
+  /internal-transfers/me/inbound/{sender_user_id}:
+    get:
+      security: [ { fundUserApiKey: [] } ]
+      summary: Cumulative internal USD transferred from one Midas user to the current fund user
+      parameters:
+        - name: sender_user_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Inbound transfer aggregate scoped to the authenticated fund user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboundTransferSenderSummary' }
+        '401': { description: Missing or invalid fund API key }
+  /internal-transfers/me/inbound/summary:
+    post:
+      security: [ { fundUserApiKey: [] } ]
+      summary: Cumulative internal USD transferred from up to one hundred Midas users to the current fund user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InboundTransferSummaryRequest' }
+      responses:
+        '200':
+          description: Inbound transfer aggregates scoped to the authenticated fund user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboundTransferSummaryResponse' }
+        '401': { description: Missing or invalid fund API key }
   /wallet-addresses/me:
     get:
       security: [ { bearerAuth: [] } ]
@@ -438,6 +471,34 @@ components:
         transaction_hash: { type: [string, 'null'], pattern: '^0x[a-fA-F0-9]{64}$' }
         external_reference: { type: [string, 'null'] }
         note: { type: [string, 'null'] }
+    InboundTransferSummaryRequest:
+      type: object
+      required: [sender_user_ids]
+      properties:
+        sender_user_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string, format: uuid }
+    InboundTransferSenderSummary:
+      type: object
+      required: [sender_user_id, recipient_user_id, total_received_usd_nanos, total_received_usd, transfer_count, last_received_at]
+      properties:
+        sender_user_id: { type: string, format: uuid }
+        recipient_user_id: { type: string, format: uuid, description: Always the fund user authenticated by X-Api-Key. }
+        total_received_usd_nanos: { type: integer, format: int64, minimum: 0, description: Exact cumulative inbound USD nanodollars. Fund-user payouts never reduce this value. }
+        total_received_usd: { type: string }
+        transfer_count: { type: integer, format: int64, minimum: 0 }
+        last_received_at: { type: [string, 'null'], format: date-time }
+    InboundTransferSummaryResponse:
+      type: object
+      required: [recipient_user_id, senders]
+      properties:
+        recipient_user_id: { type: string, format: uuid, description: The fund user authenticated by X-Api-Key. }
+        senders:
+          type: array
+          items: { $ref: '#/components/schemas/InboundTransferSenderSummary' }
     FundUser:
       type: object
       required: [id, name, api_key_prefix, available_usd_nanos, available_usd, created_at]
