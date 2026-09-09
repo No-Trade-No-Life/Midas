@@ -14,6 +14,7 @@
 - A scannable QR code for the dedicated deposit address.
 - Linkit React Components, including the zero-prop `LinkitMyInfo` account control and `LinkitUserPicker` for username-based transfer recipients.
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
+- Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has its own dedicated deposit wallet, balance, immutable history, and one-time API key for safe API operations and internal transfers.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
 - Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page. Its API key can then make idempotent USD charges and ledger-only payouts against authorized users. A payout returns USD from the channel owner to the user and never requests an on-chain withdrawal.
 - OpenAPI contract and CI foundation.
@@ -40,7 +41,8 @@ Existing SQLite databases migrate on the first startup that carries this version
 | Table | Purpose |
 | --- | --- |
 | `app_meta` | `root_user_id` and root-managed configuration secrets that are never returned by APIs |
-| `users` | Auth Mini subjects |
+| `users` | Ledger principals: Auth Mini-backed `human` users and root-managed `fund` users |
+| `fund_user_api_keys` | One-way API-key hash and non-secret prefix for each fund user |
 | `evm_networks` | Seeded built-in chain metadata with verified RPC URLs |
 | `supported_assets` | Seeded USDC / USDT contract and decimal metadata |
 | `wallet_addresses` | One user EVM-compatible deposit address (legacy chain field is an internal sentinel) |
@@ -93,6 +95,14 @@ GET /api/agreements/{id}
 POST/DELETE /api/agreements/{id}/bind
 POST /api/agreements/{id}/api-key
 ```
+
+A root operator creates and rotates fund users through `POST /api/admin/fund-users`
+and `POST /api/admin/fund-users/{id}/api-key`. The plaintext key is returned once.
+With `X-Api-Key`, a fund user may call `GET /api/assets`, `GET /api/balances/me`,
+`GET /api/ledger/me`, `GET /api/wallet-addresses/me`, `POST /api/deposits/confirm`,
+`POST /api/deposits/claim`, and `POST /api/transfers`. It always acts as that fund
+user. Fund API keys cannot request on-chain withdrawals or modify root settings;
+the root GUI can initiate a withdrawal from the fund user's own balance.
 
 An external payment channel uses its owner-rotated `X-Api-Key` and an
 `Idempotency-Key` for `POST /api/agreements/{id}/charges` and
