@@ -15,7 +15,7 @@
 - Linkit React Components, including the zero-prop `LinkitMyInfo` account control and `LinkitUserPicker` for username-based transfer recipients.
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
-- Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page; its API key can then make an idempotent USD charge only against an authorized user's available balance, paired with an immutable credit to the owner.
+- Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page. Its API key can then make idempotent USD charges and ledger-only payouts against authorized users. A payout returns USD from the channel owner to the user and never requests an on-chain withdrawal.
 - OpenAPI contract and CI foundation.
 
 ## Architecture
@@ -54,7 +54,7 @@ Existing SQLite databases migrate on the first startup that carries this version
 | `internal_transfers`, `withdrawals` | Atomic internal transfers and direct-destination chain withdrawal state |
 | `payment_agreements` | Owner-created payment channels with only a one-way API-key hash and non-secret prefix |
 | `payment_agreement_bindings` | Explicit user authorization for automatic-payment channels |
-| `payment_agreement_charges` | Agreement-scoped idempotent charges and their paired ledger entries |
+| `payment_agreement_charges`, `payment_agreement_payouts` | Agreement-scoped idempotent charges and ledger-only payouts with their paired ledger entries |
 
 ## Local development
 
@@ -94,11 +94,13 @@ POST/DELETE /api/agreements/{id}/bind
 POST /api/agreements/{id}/api-key
 ```
 
-An external payment channel charges with `POST /api/agreements/{id}/charges`, an
-`X-Api-Key` issued by owner-only rotation, and an `Idempotency-Key`. It supplies
-the already-authorized `user_id` and exact `amount_usd_nanos`; Midas rejects
-unbound users and insufficient available balances without changing either
-ledger.
+An external payment channel uses its owner-rotated `X-Api-Key` and an
+`Idempotency-Key` for `POST /api/agreements/{id}/charges` and
+`POST /api/agreements/{id}/payouts`. Both requests supply the already-authorized
+`user_id`, exact `amount_usd_nanos`, and an optional integration `reference`.
+Charges debit that user and credit the owner. Payouts debit the owner and credit
+that user without broadcasting a blockchain withdrawal. Midas rejects unbound
+users and insufficient available balances without changing either ledger.
 
 The API contract is in [`openapi.yaml`](./openapi.yaml). Midas verifies every credited deposit and withdrawal receipt independently. RPC logs only discover candidates; Midas never trusts a log for token, recipient, amount, or final success state.
 

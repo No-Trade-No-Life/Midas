@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Midas API
-  version: 0.7.0
+  version: 0.8.0
   description: >-
     USD-denominated payment ledger for built-in EVM USDC and USDT on Ethereum,
     BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. Midas scans
@@ -239,6 +239,23 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementCharge' } } }
         '401': { description: Missing or invalid channel API key }
         '409': { description: User has not authorized this channel or has insufficient available USD }
+  /agreements/{id}/payouts:
+    post:
+      security: [ { agreementApiKey: [] } ]
+      summary: Return USD from the channel owner to one bound Midas user atomically; this never broadcasts a blockchain withdrawal
+      parameters:
+        - { $ref: '#/components/parameters/AgreementApiKey' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementPayoutInput' } } }
+      responses:
+        '200':
+          description: Posted, idempotent automatic payout
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementPayout' } } }
+        '401': { description: Missing or invalid channel API key }
+        '409': { description: User has not authorized this channel or the channel owner has insufficient available USD }
   /agreements/{id}/charges/summary:
     post:
       security: [ { agreementApiKey: [] } ]
@@ -528,6 +545,7 @@ components:
       properties:
         user_id: { type: string, format: uuid, description: User who already authorized this payment channel. }
         amount_usd_nanos: { type: integer, format: int64, minimum: 1, description: Exact USD nanodollars to charge. }
+        reference: { type: [string, 'null'], maxLength: 120, description: "Integration correlation reference, copied into both immutable Midas ledger notes." }
     PaymentAgreementCharge:
       type: object
       required: [id, agreement_id, payer_user_id, owner_user_id, amount_usd_nanos, amount_usd, created_at]
@@ -538,6 +556,25 @@ components:
         owner_user_id: { type: string, format: uuid }
         amount_usd_nanos: { type: integer, format: int64 }
         amount_usd: { type: string }
+        created_at: { type: string, format: date-time }
+    PaymentAgreementPayoutInput:
+      type: object
+      required: [user_id, amount_usd_nanos]
+      properties:
+        user_id: { type: string, format: uuid, description: Bound Midas user receiving the returned USD balance. }
+        amount_usd_nanos: { type: integer, format: int64, minimum: 1, description: Exact USD nanodollars to return. }
+        reference: { type: [string, 'null'], maxLength: 120, description: "Integration correlation reference, copied into both immutable Midas ledger notes." }
+    PaymentAgreementPayout:
+      type: object
+      required: [id, agreement_id, recipient_user_id, owner_user_id, amount_usd_nanos, amount_usd, reference, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        agreement_id: { type: string, format: uuid }
+        recipient_user_id: { type: string, format: uuid }
+        owner_user_id: { type: string, format: uuid }
+        amount_usd_nanos: { type: integer, format: int64 }
+        amount_usd: { type: string }
+        reference: { type: [string, 'null'] }
         created_at: { type: string, format: date-time }
     PaymentAgreementChargeSummaryInput:
       type: object
@@ -583,7 +620,7 @@ components:
       required: [symbol, amount, error]
       properties:
         symbol: { type: string, example: ETH }
-        amount: { type: [string, 'null'], description: Exact decimal balance, without floating-point rounding. }
+        amount: { type: [string, 'null'], description: "Exact decimal balance, without floating-point rounding." }
         error: { type: [string, 'null'], description: Present only when this individual RPC lookup failed. }
     CustodyNetworkBalances:
       type: object
