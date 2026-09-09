@@ -14,7 +14,7 @@
 - A scannable QR code for the dedicated deposit address.
 - Linkit React Components, including the zero-prop `LinkitMyInfo` account control and `LinkitUserPicker` for username-based transfer recipients.
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
-- Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has no EVM wallet or blockchain API surface: its transferable Midas user ID, balance, immutable history, and one-time API key are for internal transfers only.
+- Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has no EVM wallet or blockchain API surface: its transferable Midas user ID, balance, immutable history, and one-time API key are for internal transfers only. Its API key can also read the exact cumulative transfers received from a specified Midas user, so an application can treat its fund user as a public recharge account without asking users to authorize automatic charges.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
 - Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page. Its API key can then make idempotent USD charges and ledger-only payouts against authorized users. A payout returns USD from the channel owner to the user and never requests an on-chain withdrawal.
 - OpenAPI contract and CI foundation.
@@ -99,9 +99,13 @@ POST /api/agreements/{id}/api-key
 A root operator creates and rotates fund users through `POST /api/admin/fund-users`
 and `POST /api/admin/fund-users/{id}/api-key`. The plaintext key is returned once.
 With `X-Api-Key`, a fund user may call `GET /api/balances/me`, `GET /api/ledger/me`,
-and `POST /api/transfers`. It always acts as that fund user. Fund API keys cannot
-access EVM assets, deposit addresses, deposit verification, withdrawals, or root
-settings; the root GUI cannot request an on-chain withdrawal for a fund user.
+`GET /api/internal-transfers/me/inbound/{sender_user_id}`, the batched
+`POST /api/internal-transfers/me/inbound/summary`, and `POST /api/transfers`.
+Inbound-transfer aggregates always use the fund user inferred from the key; callers
+cannot choose a recipient. They are cumulative exact nanodollars and are not reduced
+when the fund user later transfers USD out. Fund API keys cannot access EVM assets,
+deposit addresses, deposit verification, withdrawals, or root settings; the root GUI
+cannot request an on-chain withdrawal for a fund user.
 
 An external payment channel uses its owner-rotated `X-Api-Key` and an
 `Idempotency-Key` for `POST /api/agreements/{id}/charges` and

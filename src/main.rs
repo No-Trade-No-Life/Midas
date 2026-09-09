@@ -1,5 +1,10 @@
 use std::{
-    collections::HashSet, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -767,6 +772,27 @@ struct PaymentAgreementPayerSummary {
     last_charged_at: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct InboundTransferSummaryRequest {
+    sender_user_ids: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct InboundTransferSenderSummary {
+    sender_user_id: String,
+    recipient_user_id: String,
+    total_received_usd_nanos: i64,
+    total_received_usd: String,
+    transfer_count: i64,
+    last_received_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct InboundTransferSummaryResponse {
+    recipient_user_id: String,
+    senders: Vec<InboundTransferSenderSummary>,
+}
+
 struct LedgerInsert<'a> {
     id: &'a str,
     user_id: &'a str,
@@ -834,6 +860,14 @@ fn app(state: AppState) -> Router {
         .route("/assets", get(list_assets))
         .route("/balances/me", get(my_balance))
         .route("/ledger/me", get(my_ledger))
+        .route(
+            "/internal-transfers/me/inbound/:sender_user_id",
+            get(my_inbound_transfer_summary),
+        )
+        .route(
+            "/internal-transfers/me/inbound/summary",
+            post(my_inbound_transfer_summaries),
+        )
         .route("/wallet-addresses/me", get(my_wallet_addresses))
         .route("/deposits/confirm", post(confirm_deposit))
         .route("/deposits/claim", post(claim_deposit))
@@ -1016,6 +1050,112 @@ async fn my_ledger(
 ) -> Result<Json<Vec<LedgerEntry>>, ApiError> {
     let user_id = require_internal_user(&state, &headers).await?;
     Ok(Json(load_user_ledger(&state.db, &user_id).await?))
+}
+
+async fn my_inbound_transfer_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(sender_user_id): Path<String>,
+) -> Result<Json<InboundTransferSenderSummary>, ApiError> {
+    let recipient_user_id = require_fund_user_api_key(&state, fund_user_api_key(&headers)?).await?;
+    valid_sender_user_id(&sender_user_id)?;
+    Ok(Json(
+        load_inbound_transfer_summaries(&state.db, &recipient_user_id, &[sender_user_id])
+            .await?
+            .pop()
+            .expect("one requested sender always produces one summary"),
+    ))
+}
+
+async fn my_inbound_transfer_summaries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<InboundTransferSummaryRequest>,
+) -> Result<Json<InboundTransferSummaryResponse>, ApiError> {
+    let recipient_user_id = require_fund_user_api_key(&state, fund_user_api_key(&headers)?).await?;
+    valid_sender_user_ids(&input.sender_user_ids)?;
+    let senders =
+        load_inbound_transfer_summaries(&state.db, &recipient_user_id, &input.sender_user_ids)
+            .await?;
+    Ok(Json(InboundTransferSummaryResponse {
+        recipient_user_id,
+        senders,
+    }))
+}
+
+fn valid_sender_user_id(value: &str) -> Result<(), ApiError> {
+    Uuid::parse_str(value)
+        .map(|_| ())
+        .map_err(|_| ApiError::invalid("sender_user_id must be a Midas UUID"))
+}
+
+fn valid_sender_user_ids(values: &[String]) -> Result<(), ApiError> {
+    if values.is_empty() || values.len() > 100 {
+        return Err(ApiError::invalid(
+            "sender_user_ids must contain between 1 and 100 Midas UUIDs",
+        ));
+    }
+    let mut unique = HashSet::new();
+    for value in values {
+        valid_sender_user_id(value)?;
+        if !unique.insert(value) {
+            return Err(ApiError::invalid(
+                "sender_user_ids must not contain duplicates",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn load_inbound_transfer_summaries(
+    db: &SqlitePool,
+    recipient_user_id: &str,
+    sender_user_ids: &[String],
+) -> Result<Vec<InboundTransferSenderSummary>, ApiError> {
+    let mut query = sqlx::QueryBuilder::<Sqlite>::new(
+        "SELECT sender_user_id,COALESCE(SUM(amount_usd_nanos),0),COUNT(*),MAX(created_at) FROM internal_transfers WHERE recipient_user_id=",
+    );
+    query.push_bind(recipient_user_id);
+    query.push(" AND sender_user_id IN (");
+    {
+        let mut separated = query.separated(",");
+        for sender_user_id in sender_user_ids {
+            separated.push_bind(sender_user_id);
+        }
+    }
+    query.push(") GROUP BY sender_user_id");
+    let totals = query
+        .build()
+        .fetch_all(db)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<String, _>(0),
+                (
+                    row.get::<i64, _>(1),
+                    row.get::<i64, _>(2),
+                    row.get::<Option<String>, _>(3),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    Ok(sender_user_ids
+        .iter()
+        .map(|sender_user_id| {
+            let (total_received_usd_nanos, transfer_count, last_received_at) =
+                totals.get(sender_user_id).cloned().unwrap_or((0, 0, None));
+            InboundTransferSenderSummary {
+                sender_user_id: sender_user_id.clone(),
+                recipient_user_id: recipient_user_id.to_owned(),
+                total_received_usd_nanos,
+                total_received_usd: format_usd(total_received_usd_nanos),
+                transfer_count,
+                last_received_at,
+            }
+        })
+        .collect())
 }
 
 async fn load_user_ledger(db: &SqlitePool, user_id: &str) -> Result<Vec<LedgerEntry>, ApiError> {
@@ -6258,6 +6398,24 @@ mod tests {
                 .unwrap(),
             0
         );
+        let summaries = load_inbound_transfer_summaries(
+            &db,
+            &fund_user_id,
+            &[manager_user_id.clone(), recipient_user_id.clone()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(summaries[0].sender_user_id, manager_user_id);
+        assert_eq!(summaries[0].recipient_user_id, fund_user_id);
+        assert_eq!(summaries[0].total_received_usd_nanos, 750_000);
+        assert_eq!(summaries[0].transfer_count, 1);
+        assert_eq!(summaries[1].total_received_usd_nanos, 0);
+        assert_eq!(summaries[1].transfer_count, 0);
+        assert!(valid_sender_user_ids(&[]).is_err());
+        let too_many_senders = (0..101)
+            .map(|_| Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        assert!(valid_sender_user_ids(&too_many_senders).is_err());
         let _ = std::fs::remove_file(path);
     }
 
