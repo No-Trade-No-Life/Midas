@@ -479,6 +479,28 @@ struct AdminBalancesResponse {
     users: Vec<AdminUserBalance>,
 }
 
+#[derive(Serialize)]
+struct FundUser {
+    id: String,
+    name: String,
+    api_key_prefix: String,
+    wallet_address: String,
+    available_usd_nanos: i64,
+    available_usd: String,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct FundUserInput {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct FundUserApiKey {
+    user: FundUser,
+    api_key: String,
+}
+
 #[derive(Deserialize, Default)]
 struct AdminLedgerQuery {
     kind: Option<String>,
@@ -871,6 +893,19 @@ fn app(state: AppState) -> Router {
             get(read_deposit_discovery_status),
         )
         .route("/admin/custody-balances", get(read_custody_balances))
+        .route(
+            "/admin/fund-users",
+            get(list_fund_users).post(create_fund_user),
+        )
+        .route(
+            "/admin/fund-users/:id/api-key",
+            post(rotate_fund_user_api_key),
+        )
+        .route(
+            "/admin/fund-users/:id/withdrawals",
+            post(create_fund_user_withdrawal),
+        )
+        .route("/admin/fund-users/:id/ledger", get(fund_user_ledger))
         .route("/admin/balances", get(list_admin_balances))
         .route("/admin/ledger", get(list_admin_ledger))
         .route("/admin/deposits", get(list_admin_deposits))
@@ -963,7 +998,7 @@ async fn list_assets(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SupportedAsset>>, ApiError> {
-    require_initialized_user(&state, &headers).await?;
+    require_fund_or_human_user(&state, &headers).await?;
     Ok(Json(builtin_assets()))
 }
 
@@ -971,7 +1006,7 @@ async fn my_balance(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Balance>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+    let user_id = require_fund_or_human_user(&state, &headers).await?;
     let nanos = available_balance(&state.db, &user_id).await?;
     Ok(Json(Balance {
         currency: "USD",
@@ -984,7 +1019,7 @@ async fn my_ledger(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<LedgerEntry>>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+    let user_id = require_fund_or_human_user(&state, &headers).await?;
     Ok(Json(load_user_ledger(&state.db, &user_id).await?))
 }
 
@@ -1019,7 +1054,7 @@ async fn my_wallet_addresses(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WalletAddress>>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+    let user_id = require_fund_or_human_user(&state, &headers).await?;
     let row = sqlx::query("SELECT address,created_at FROM wallet_addresses WHERE user_id=?1 ORDER BY created_at,id LIMIT 1")
         .bind(user_id)
         .fetch_optional(&state.db)
@@ -1093,7 +1128,7 @@ async fn confirm_deposit(
     headers: HeaderMap,
     Json(input): Json<DepositRequest>,
 ) -> Result<Json<DepositResponse>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+    let user_id = require_fund_or_human_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
     let target = load_deposit_target(&state.db, &user_id, &input).await?;
     let verified = verify_deposit_receipt(&target, &input.transaction_hash).await?;
@@ -1125,7 +1160,7 @@ async fn claim_deposit(
     headers: HeaderMap,
     Json(input): Json<DepositClaimRequest>,
 ) -> Result<Json<DepositResponse>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+    let user_id = require_fund_or_human_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
     let targets = load_deposit_targets_for_chain(&state.db, &user_id, input.chain_id).await?;
     let (target, verified) = verify_deposit_claim(targets, &input.transaction_hash).await?;
@@ -1472,7 +1507,7 @@ async fn create_transfer(
     headers: HeaderMap,
     Json(input): Json<TransferRequest>,
 ) -> Result<Json<TransferResponse>, ApiError> {
-    let sender = require_initialized_user(&state, &headers).await?;
+    let sender = require_fund_or_human_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
     if input.amount_usd_nanos <= 0 {
         return Err(ApiError::invalid(
@@ -1485,7 +1520,7 @@ async fn create_transfer(
         ));
     }
     Uuid::parse_str(&input.recipient_user_id)
-        .map_err(|_| ApiError::invalid("recipient_user_id must be an Auth Mini UUID"))?;
+        .map_err(|_| ApiError::invalid("recipient_user_id must be a Midas UUID"))?;
     let _write = state.write_lock.lock().await;
     Ok(Json(
         post_transfer(&state.db, &sender, &input, &idempotency_key).await?,
@@ -2213,6 +2248,34 @@ fn payment_agreement_name(value: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
+fn fund_user_name(value: &str) -> Result<String, ApiError> {
+    let name = value.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(ApiError::invalid(
+            "fund user name must contain 1 to 80 visible characters",
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn new_fund_user_api_key() -> String {
+    let mut bytes = [0_u8; 32];
+    thread_rng().fill_bytes(&mut bytes);
+    format!("midas_fund_{}", hex::encode(bytes))
+}
+
+fn fund_user_api_key_hash(api_key: &str) -> String {
+    hex::encode(keccak256(api_key.as_bytes()))
+}
+
+fn fund_user_api_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "a valid fund API key is required"))
+}
+
 fn new_payment_agreement_api_key() -> String {
     let mut bytes = [0_u8; 32];
     thread_rng().fill_bytes(&mut bytes);
@@ -2446,6 +2509,17 @@ async fn create_withdrawal(
 ) -> Result<Json<WithdrawalResponse>, ApiError> {
     let user_id = require_initialized_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
+    Ok(Json(
+        post_withdrawal(&state, &user_id, &input, &idempotency_key).await?,
+    ))
+}
+
+async fn post_withdrawal(
+    state: &AppState,
+    user_id: &str,
+    input: &WithdrawalRequest,
+    idempotency_key: &str,
+) -> Result<WithdrawalResponse, ApiError> {
     if input.amount_usd_nanos <= 0 {
         return Err(ApiError::invalid(
             "withdrawal amount must be greater than zero",
@@ -2460,11 +2534,11 @@ async fn create_withdrawal(
     );
     let _write = state.write_lock.lock().await;
     if let Some(existing) =
-        operation_resource(&state.db, &user_id, "withdrawal", &idempotency_key).await?
+        operation_resource(&state.db, user_id, "withdrawal", idempotency_key).await?
     {
-        return Ok(Json(read_withdrawal_response(&state.db, &existing).await?));
+        return read_withdrawal_response(&state.db, &existing).await;
     }
-    if available_balance(&state.db, &user_id).await? < input.amount_usd_nanos {
+    if available_balance(&state.db, user_id).await? < input.amount_usd_nanos {
         return Err(ApiError::conflict(
             "the available USD balance is insufficient",
         ));
@@ -2478,7 +2552,7 @@ async fn create_withdrawal(
         &mut tx,
         LedgerInsert {
             id: &ledger_id,
-            user_id: &user_id,
+            user_id,
             kind: "withdrawal",
             status: "pending",
             asset_id: Some(&input.asset_id),
@@ -2493,7 +2567,7 @@ async fn create_withdrawal(
     .await?;
     sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,address_book_entry_id,destination_address,amount_usd_nanos,status,created_at,updated_at) VALUES(?1,?2,?3,?4,NULL,?5,?6,'awaiting_signer',?7,?7)")
         .bind(&withdrawal_id)
-        .bind(&user_id)
+        .bind(user_id)
         .bind(&input.asset_id)
         .bind(&ledger_id)
         .bind(&destination_address)
@@ -2507,9 +2581,9 @@ async fn create_withdrawal(
         &mut tx,
         OperationInsert {
             id: &operation_id,
-            user_id: &user_id,
+            user_id,
             kind: "withdrawal",
-            idempotency_key: &idempotency_key,
+            idempotency_key,
             resource_id: &withdrawal_id,
             status: "accepted",
             now: &now,
@@ -2519,7 +2593,7 @@ async fn create_withdrawal(
     tx.commit().await.map_err(db_error)?;
     let response = read_withdrawal_response(&state.db, &withdrawal_id).await?;
     spawn_withdrawal_submission(state.clone(), withdrawal_id);
-    Ok(Json(response))
+    Ok(response)
 }
 
 async fn my_withdrawals(
@@ -2848,6 +2922,133 @@ async fn retry_withdrawal(
     let response = read_withdrawal_response(&state.db, &id).await?;
     spawn_withdrawal_submission(state, id);
     Ok(Json(response))
+}
+
+async fn list_fund_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<FundUser>>, ApiError> {
+    require_root(&state, &headers).await?;
+    Ok(Json(load_fund_users(&state.db).await?))
+}
+
+async fn create_fund_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<FundUserInput>,
+) -> Result<Json<FundUserApiKey>, ApiError> {
+    let manager_user_id = require_root(&state, &headers).await?;
+    let name = fund_user_name(&input.name)?;
+    let user_id = Uuid::new_v4().to_string();
+    let api_key = new_fund_user_api_key();
+    let api_key_prefix: String = api_key.chars().take(24).collect();
+    let now = Utc::now().to_rfc3339();
+    let _write = state.write_lock.lock().await;
+    let mut tx = state.db.begin().await.map_err(db_error)?;
+    sqlx::query("INSERT INTO users(id,kind,name,manager_user_id,status,created_at) VALUES(?1,'fund',?2,?3,'active',?4)")
+        .bind(&user_id)
+        .bind(&name)
+        .bind(&manager_user_id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    provision_user_wallet_in_transaction(&mut tx, &user_id).await?;
+    sqlx::query("INSERT INTO fund_user_api_keys(user_id,api_key_hash,api_key_prefix,created_at,rotated_at) VALUES(?1,?2,?3,?4,?4)")
+        .bind(&user_id)
+        .bind(fund_user_api_key_hash(&api_key))
+        .bind(&api_key_prefix)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+    Ok(Json(FundUserApiKey {
+        user: read_fund_user(&state.db, &user_id).await?,
+        api_key,
+    }))
+}
+
+async fn rotate_fund_user_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<FundUserApiKey>, ApiError> {
+    require_root(&state, &headers).await?;
+    let api_key = new_fund_user_api_key();
+    let api_key_prefix: String = api_key.chars().take(24).collect();
+    let now = Utc::now().to_rfc3339();
+    let _write = state.write_lock.lock().await;
+    let changed = sqlx::query("UPDATE fund_user_api_keys SET api_key_hash=?1,api_key_prefix=?2,rotated_at=?3 WHERE user_id=?4 AND EXISTS(SELECT 1 FROM users WHERE id=?4 AND kind='fund' AND status='active')")
+        .bind(fund_user_api_key_hash(&api_key))
+        .bind(&api_key_prefix)
+        .bind(&now)
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        .map_err(db_error)?;
+    if changed.rows_affected() != 1 {
+        return Err(ApiError::invalid("fund user does not exist"));
+    }
+    Ok(Json(FundUserApiKey {
+        user: read_fund_user(&state.db, &id).await?,
+        api_key,
+    }))
+}
+
+async fn create_fund_user_withdrawal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<WithdrawalRequest>,
+) -> Result<Json<WithdrawalResponse>, ApiError> {
+    require_root(&state, &headers).await?;
+    read_fund_user(&state.db, &id).await?;
+    let idempotency_key = idempotency_key(&headers)?;
+    Ok(Json(
+        post_withdrawal(&state, &id, &input, &idempotency_key).await?,
+    ))
+}
+
+async fn fund_user_ledger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<LedgerEntry>>, ApiError> {
+    require_root(&state, &headers).await?;
+    read_fund_user(&state.db, &id).await?;
+    Ok(Json(load_user_ledger(&state.db, &id).await?))
+}
+
+async fn load_fund_users(db: &SqlitePool) -> Result<Vec<FundUser>, ApiError> {
+    let rows = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,w.address,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id JOIN wallet_addresses w ON w.user_id=u.id LEFT JOIN ledger_entries e ON e.user_id=u.id WHERE u.kind='fund' AND u.status='active' GROUP BY u.id,u.name,k.api_key_prefix,w.address,u.created_at ORDER BY u.created_at DESC,u.id DESC")
+        .fetch_all(db)
+        .await
+        .map_err(db_error)?;
+    Ok(rows.into_iter().map(fund_user).collect())
+}
+
+async fn read_fund_user(db: &SqlitePool, user_id: &str) -> Result<FundUser, ApiError> {
+    let row = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,w.address,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id JOIN wallet_addresses w ON w.user_id=u.id LEFT JOIN ledger_entries e ON e.user_id=u.id WHERE u.id=?1 AND u.kind='fund' AND u.status='active' GROUP BY u.id,u.name,k.api_key_prefix,w.address,u.created_at")
+        .bind(user_id)
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::invalid("fund user does not exist"))?;
+    Ok(fund_user(row))
+}
+
+fn fund_user(row: sqlx::sqlite::SqliteRow) -> FundUser {
+    let available_usd_nanos: i64 = row.get(5);
+    FundUser {
+        id: row.get(0),
+        name: row.get(1),
+        api_key_prefix: row.get(2),
+        wallet_address: row.get(3),
+        created_at: row.get(4),
+        available_usd_nanos,
+        available_usd: format_usd(available_usd_nanos),
+    }
 }
 
 async fn list_admin_balances(
@@ -4079,6 +4280,36 @@ fn chain_error(error: impl std::fmt::Display) -> ApiError {
     )
 }
 
+async fn require_fund_or_human_user(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
+    if headers.contains_key("x-api-key") {
+        return require_fund_user_api_key(state, fund_user_api_key(headers)?).await;
+    }
+    require_initialized_user(state, headers).await
+}
+
+async fn require_fund_user_api_key(state: &AppState, api_key: &str) -> Result<String, ApiError> {
+    if meta(&state.db, ROOT_USER_ID_KEY)
+        .await
+        .map_err(db_error)?
+        .is_none()
+    {
+        return Err(ApiError::not_configured());
+    }
+    fund_user_id_for_api_key(&state.db, api_key).await
+}
+
+async fn fund_user_id_for_api_key(db: &SqlitePool, api_key: &str) -> Result<String, ApiError> {
+    sqlx::query_scalar("SELECT u.id FROM fund_user_api_keys k JOIN users u ON u.id=k.user_id WHERE k.api_key_hash=?1 AND u.kind='fund' AND u.status='active'")
+        .bind(fund_user_api_key_hash(api_key))
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "a valid fund API key is required"))
+}
+
 async fn require_user(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     let token = headers
         .get(header::AUTHORIZATION)
@@ -4194,6 +4425,29 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
     {
         sqlx::query(statement).execute(db).await?;
     }
+    if !table_has_column(db, "users", "kind").await? {
+        sqlx::query("ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'human' CHECK (kind IN ('human','fund'))")
+            .execute(db)
+            .await?;
+    }
+    if !table_has_column(db, "users", "name").await? {
+        sqlx::query("ALTER TABLE users ADD COLUMN name TEXT")
+            .execute(db)
+            .await?;
+    }
+    if !table_has_column(db, "users", "manager_user_id").await? {
+        sqlx::query("ALTER TABLE users ADD COLUMN manager_user_id TEXT")
+            .execute(db)
+            .await?;
+    }
+    if !table_has_column(db, "users", "status").await? {
+        sqlx::query("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled'))")
+            .execute(db)
+            .await?;
+    }
+    sqlx::query("CREATE INDEX IF NOT EXISTS users_kind_created_idx ON users(kind, created_at DESC, id DESC)")
+        .execute(db)
+        .await?;
     if !table_has_column(db, "supported_assets", "token_decimals").await? {
         sqlx::query(
             "ALTER TABLE supported_assets ADD COLUMN token_decimals INTEGER NOT NULL DEFAULT 6",
@@ -4447,6 +4701,48 @@ mod tests {
             .unwrap();
         migrate(&db).await.unwrap();
         assert!(meta(&db, "etherscan_api_key").await.unwrap().is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn migrates_existing_human_users_before_creating_fund_user_indexes() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        sqlx::query("CREATE TABLE users (id TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        migrate(&db).await.unwrap();
+        assert!(table_has_column(&db, "users", "kind").await.unwrap());
+        assert!(table_has_column(&db, "users", "name").await.unwrap());
+        assert!(
+            table_has_column(&db, "users", "manager_user_id")
+                .await
+                .unwrap()
+        );
+        assert!(table_has_column(&db, "users", "status").await.unwrap());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT kind FROM users WHERE id=?1")
+                .bind(&user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            "human"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT name FROM sqlite_master WHERE type='index' AND name='users_kind_created_idx'")
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            "users_kind_created_idx"
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -5807,6 +6103,107 @@ mod tests {
             .unwrap(),
             2
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn fund_user_has_its_own_wallet_key_and_transfer_ledger() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let manager_user_id = Uuid::new_v4().to_string();
+        let fund_user_id = Uuid::new_v4().to_string();
+        let recipient_user_id = Uuid::new_v4().to_string();
+        let api_key = new_fund_user_api_key();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&manager_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users(id,kind,name,manager_user_id,status,created_at) VALUES(?1,'fund','1Exchange Settlement',?2,'active',?3)")
+            .bind(&fund_user_id)
+            .bind(&manager_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        provision_user_wallet(&db, &fund_user_id).await.unwrap();
+        sqlx::query("INSERT INTO fund_user_api_keys(user_id,api_key_hash,api_key_prefix,created_at,rotated_at) VALUES(?1,?2,'midas_fund_test',?3,?3)")
+            .bind(&fund_user_id)
+            .bind(fund_user_api_key_hash(&api_key))
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment','posted',2000000,2000000,?3)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&fund_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let fund = read_fund_user(&db, &fund_user_id).await.unwrap();
+        assert_eq!(fund.name, "1Exchange Settlement");
+        assert_eq!(fund.available_usd_nanos, 2_000_000);
+        assert!(fund.wallet_address.starts_with("0x"));
+        assert_eq!(
+            fund_user_id_for_api_key(&db, &api_key).await.unwrap(),
+            fund_user_id
+        );
+        assert_eq!(
+            fund_user_id_for_api_key(&db, "midas_fund_invalid")
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM fund_user_api_keys WHERE api_key_hash=?1"
+            )
+            .bind(fund_user_api_key_hash(&api_key))
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            1
+        );
+
+        let transfer = post_transfer(
+            &db,
+            &fund_user_id,
+            &TransferRequest {
+                recipient_user_id: recipient_user_id.clone(),
+                amount_usd_nanos: 750_000,
+                note: Some("1ex:midas:out:test".to_string()),
+            },
+            "fund-user-transfer",
+        )
+        .await
+        .unwrap();
+        let retry = post_transfer(
+            &db,
+            &fund_user_id,
+            &TransferRequest {
+                recipient_user_id: recipient_user_id.clone(),
+                amount_usd_nanos: 750_000,
+                note: Some("ignored after idempotency".to_string()),
+            },
+            "fund-user-transfer",
+        )
+        .await
+        .unwrap();
+        assert_eq!(transfer.id, retry.id);
+        assert_eq!(
+            available_balance(&db, &fund_user_id).await.unwrap(),
+            1_250_000
+        );
+        assert_eq!(
+            available_balance(&db, &recipient_user_id).await.unwrap(),
+            750_000
+        );
+        assert_eq!(load_user_ledger(&db, &fund_user_id).await.unwrap().len(), 2);
         let _ = std::fs::remove_file(path);
     }
 }

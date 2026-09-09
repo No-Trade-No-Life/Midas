@@ -8,7 +8,23 @@ CREATE TABLE IF NOT EXISTS app_meta (
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'human' CHECK (kind IN ('human', 'fund')),
+  name TEXT,
+  manager_user_id TEXT REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- A fund user is an application-owned Midas principal. It reuses the same
+-- wallet, ledger, and transfer tables as a human user, but has no Auth Mini
+-- sign-in identity. Its one-time API key is stored as a hash and can only act
+-- as this fund user; it is never accepted for EVM withdrawals or root setup.
+CREATE TABLE IF NOT EXISTS fund_user_api_keys (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  api_key_hash TEXT NOT NULL UNIQUE,
+  api_key_prefix TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  rotated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS evm_networks (
