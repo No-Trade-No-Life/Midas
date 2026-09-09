@@ -7,4 +7,5 @@ if (!source.includes('autoRedirectToLogin>') || source.includes('autoRedirectToL
 if (source.includes('function Welcome')) throw new Error('Midas must redirect unauthenticated visitors through Auth Mini instead of rendering a local welcome page.');
 if (source.includes('LinkitAppHeaderUser')) throw new Error('Midas must use the zero-prop LinkitMyInfo component.');
 if (source.includes('id="transaction-hash"')) throw new Error('The customer deposit GUI must not require a transaction hash.');
+if (!source.includes('closePage') || !source.includes('window.close()')) throw new Error('Completed transfer checkout must offer a close-page action.');
 console.log('Midas web integration check passed');
