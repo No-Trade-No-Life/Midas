@@ -79,6 +79,7 @@ npm --prefix web run dev
 Other applications can use the OpenAPI-described payment API with an Auth Mini bearer token. Every payment write requires `Idempotency-Key`:
 
 ```text
+GET /api/withdrawal-availability?asset_id=1-USDC
 GET /api/balances/me
 GET /api/ledger/me
 GET /api/wallet-addresses/me
@@ -139,3 +140,36 @@ Midas ships the chain, RPC, and USDC/USDT contract mapping in the binary; caller
 Midas is deployed through the tracked Release and Deploy Production workflows to `https://midas.ntnl.io`. The service binds privately to `127.0.0.1:8787`; Caddy terminates TLS and proxies the public hostname. Releases are static Linux artifacts with SHA-256 and Git SHA metadata verification before activation.
 
 Treat the SQLite file as a high-value secret: restrict the `/var/lib/midas` directory to the service account, back it up encrypted, and do not configure a production custody key until the built-in contract map and withdrawal policy have been independently checked.
+
+## Withdrawal availability
+
+Signed-in human users see network/token capacity, readiness, gas sufficiency, and
+observation time in the withdrawal drawer. The endpoint never returns the custody
+address or raw RPC diagnostics. Root custody balances retain their address and
+native/USDC/USDT detail. Fund API keys cannot access availability.
+
+The read cache is shared across users, bounded by the 12 built-in assets, expires
+after five seconds, caches safe failures, and bounds an RPC observation to eight
+seconds. Observations pin token and native balances to one block. Reservations
+are read from SQLite on every lookup. Creation bypasses cached observations and
+holds the custody execution lock followed by the write lock through validation
+and the atomic ledger/withdrawal transaction. This service has one writer process;
+multiple processes sharing the database are not a supported deployment.
+
+Pending ledger reservations and awaiting-signature/signed/submitted withdrawals
+reduce same-token capacity. Gas reservations span both tokens on the same chain.
+Creation also simulates the selected destination and amount before ledger writes.
+Each new withdrawal reserves 200,000 gas at twice the observed gas price; signing
+must fit that durable budget. Collection gas funding also respects these budgets.
+A price spike can leave an accepted withdrawal awaiting a later retry. This is a
+conservative availability observation, not a guarantee against later chain changes,
+external wallet spending, or additional rollup fees. A submitted transfer already
+mined but not yet reconciled can temporarily be counted twice, reducing capacity
+safely until settlement. Keep the custody wallet dedicated to this service.
+
+Creation, signing, errors, settlement, custody configuration changes, and collection
+spending invalidate cached observations. Existing pre-upgrade withdrawals without
+a gas budget temporarily make their chain unavailable until they settle. Insufficient
+liquidity/gas or unavailable observations return HTTP 409 before any ledger debit,
+withdrawal row, or idempotency operation is created. Idempotent accepted requests
+still return their original withdrawal without requiring new liquidity.

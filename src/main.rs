@@ -1,3 +1,5 @@
+mod liquidity;
+
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -233,6 +235,7 @@ struct AppState {
     write_lock: Arc<Mutex<()>>,
     sweep_lock: Arc<Mutex<()>>,
     withdrawal_lock: Arc<Mutex<()>>,
+    liquidity_cache: Arc<Mutex<liquidity::Cache>>,
 }
 
 #[derive(Debug)]
@@ -837,6 +840,7 @@ async fn main() -> anyhow::Result<()> {
         write_lock: Arc::new(Mutex::new(())),
         sweep_lock: Arc::new(Mutex::new(())),
         withdrawal_lock: Arc::new(Mutex::new(())),
+        liquidity_cache: Arc::new(Mutex::new(liquidity::Cache::default())),
     };
     resume_submitted_withdrawals(state.clone());
     start_deposit_discovery(state.clone());
@@ -888,6 +892,7 @@ fn app(state: AppState) -> Router {
             "/withdrawal-targets/me/:id",
             axum::routing::delete(delete_withdrawal_target_note),
         )
+        .route("/withdrawal-availability", get(liquidity::read))
         .route("/withdrawals", get(my_withdrawals).post(create_withdrawal))
         .route(
             "/withdrawals/:id/address-book",
@@ -2687,6 +2692,7 @@ async fn post_withdrawal(
         "{:#x}",
         parse_address(&input.destination_address, "destination_address")?
     );
+    let _withdrawal = state.withdrawal_lock.lock().await;
     let _write = state.write_lock.lock().await;
     if let Some(existing) =
         operation_resource(&state.db, user_id, "withdrawal", idempotency_key).await?
@@ -2698,6 +2704,13 @@ async fn post_withdrawal(
             "the available USD balance is insufficient",
         ));
     }
+    let gas_reservation = liquidity::validate(
+        &state.db,
+        asset,
+        input.amount_usd_nanos,
+        &destination_address,
+    )
+    .await?;
     let withdrawal_id = Uuid::new_v4().to_string();
     let ledger_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -2731,6 +2744,12 @@ async fn post_withdrawal(
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
+    sqlx::query("UPDATE withdrawals SET gas_reservation_wei=?1 WHERE id=?2")
+        .bind(gas_reservation.to_string())
+        .bind(&withdrawal_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
     let operation_id = Uuid::new_v4().to_string();
     insert_operation(
         &mut tx,
@@ -2746,6 +2765,7 @@ async fn post_withdrawal(
     )
     .await?;
     tx.commit().await.map_err(db_error)?;
+    state.liquidity_cache.lock().await.invalidate();
     let response = read_withdrawal_response(&state.db, &withdrawal_id).await?;
     spawn_withdrawal_submission(state.clone(), withdrawal_id);
     Ok(response)
@@ -2866,6 +2886,7 @@ async fn finalize_withdrawal(
     settle_withdrawal(
         &state.db,
         &state.write_lock,
+        &state.liquidity_cache,
         &id,
         receipt.status.map(|status| status.as_u64()) == Some(1),
     )
@@ -2876,6 +2897,7 @@ async fn finalize_withdrawal(
 async fn settle_withdrawal(
     db: &SqlitePool,
     write_lock: &Mutex<()>,
+    liquidity_cache: &Mutex<liquidity::Cache>,
     withdrawal_id: &str,
     succeeded: bool,
 ) -> Result<(), ApiError> {
@@ -2914,6 +2936,7 @@ async fn settle_withdrawal(
         .await
         .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
+    liquidity_cache.lock().await.invalidate();
     Ok(())
 }
 
@@ -2936,6 +2959,7 @@ async fn write_evm_config(
         .as_deref()
         .map(|key| parse_wallet(key, 1).map(|wallet| format!("{:#x}", wallet.address())))
         .transpose()?;
+    let _withdrawal = state.withdrawal_lock.lock().await;
     let _write = state.write_lock.lock().await;
     let mut tx = state.db.begin().await.map_err(db_error)?;
     if let Some(key) = input.custody_wallet_private_key.as_deref() {
@@ -2948,6 +2972,7 @@ async fn write_evm_config(
         .await?;
     }
     tx.commit().await.map_err(db_error)?;
+    state.liquidity_cache.lock().await.invalidate();
     Ok(Json(load_evm_config(&state.db).await?))
 }
 
@@ -3379,6 +3404,7 @@ async fn submit_sweep(state: &AppState, deposit_id: &str) -> Result<(), ApiError
 }
 
 async fn submit_sweep_locked(state: &AppState, deposit_id: &str) -> Result<(), ApiError> {
+    let _withdrawal = state.withdrawal_lock.lock().await;
     let row = sqlx::query("SELECT d.asset_id,d.raw_amount,w.address,k.private_key,a.contract_address,n.rpc_url,n.chain_id FROM deposits d JOIN users u ON u.id=d.user_id AND u.kind='human' JOIN wallet_addresses w ON w.id=d.wallet_address_id JOIN wallet_private_keys k ON k.wallet_address_id=w.id JOIN supported_assets a ON a.id=d.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE d.id=?1")
         .bind(deposit_id)
         .fetch_optional(&state.db)
@@ -3412,6 +3438,33 @@ async fn submit_sweep_locked(state: &AppState, deposit_id: &str) -> Result<(), A
             "custody wallet private key does not match its configured address",
         ));
     }
+    let gas_price = provider.get_gas_price().await.map_err(chain_error)?;
+    let funding = U256::from_dec_str(DEFAULT_GAS_FUNDING_WEI).expect("funding amount");
+    let funding_tx: TypedTransaction = TransactionRequest::pay(
+        parse_address(&deposit_address, "stored deposit address")?,
+        funding,
+    )
+    .from(custody_wallet.address())
+    .into();
+    let gas_limit = provider
+        .estimate_gas(&funding_tx, None)
+        .await
+        .map_err(chain_error)?;
+    let funding_cost = gas_limit
+        .checked_mul(gas_price)
+        .and_then(|fee| fee.checked_add(funding))
+        .ok_or_else(|| ApiError::conflict("gas cost overflow"))?;
+    liquidity::protect_sweep_gas(
+        &state.db,
+        chain_id,
+        provider
+            .get_balance(custody_wallet.address(), None)
+            .await
+            .map_err(chain_error)?,
+        funding_cost,
+    )
+    .await?;
+    state.liquidity_cache.lock().await.invalidate();
     let gas_client = Arc::new(SignerMiddleware::new(provider.clone(), custody_wallet));
     let gas_pending = gas_client
         .send_transaction(
@@ -3419,7 +3472,9 @@ async fn submit_sweep_locked(state: &AppState, deposit_id: &str) -> Result<(), A
                 parse_address(&deposit_address, "stored deposit address")?,
                 U256::from_dec_str(DEFAULT_GAS_FUNDING_WEI)
                     .expect("default gas funding amount is valid"),
-            ),
+            )
+            .gas(gas_limit)
+            .gas_price(gas_price),
             None,
         )
         .await
@@ -3476,6 +3531,7 @@ async fn submit_sweep_locked(state: &AppState, deposit_id: &str) -> Result<(), A
         .await
         .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
+    state.liquidity_cache.lock().await.invalidate();
     Ok(())
 }
 
@@ -3601,9 +3657,11 @@ async fn submit_withdrawal(state: &AppState, withdrawal_id: &str) -> Result<(), 
                 .map_err(|_| ApiError::invalid("stored withdrawal transaction hash is invalid"))?,
             ),
             None => {
-                let (provider, raw, transaction_hash) = sign_withdrawal(&state.db, &target).await?;
+                let (provider, raw, transaction_hash) =
+                    sign_withdrawal(&state.db, withdrawal_id, &target).await?;
                 let _write = state.write_lock.lock().await;
                 persist_signed_withdrawal(&state.db, withdrawal_id, transaction_hash, &raw).await?;
+                state.liquidity_cache.lock().await.invalidate();
                 (provider, raw, transaction_hash)
             }
         };
@@ -3618,6 +3676,7 @@ async fn submit_withdrawal(state: &AppState, withdrawal_id: &str) -> Result<(), 
     settle_withdrawal(
         &state.db,
         &state.write_lock,
+        &state.liquidity_cache,
         withdrawal_id,
         receipt.status.map(|status| status.as_u64()) == Some(1),
     )
@@ -3635,6 +3694,7 @@ async fn settle_submitted_withdrawal(
     settle_withdrawal(
         &state.db,
         &state.write_lock,
+        &state.liquidity_cache,
         withdrawal_id,
         receipt.status.map(|status| status.as_u64()) == Some(1),
     )
@@ -3680,6 +3740,7 @@ async fn wait_for_transaction_receipt(
 
 async fn sign_withdrawal(
     db: &SqlitePool,
+    withdrawal_id: &str,
     target: &WithdrawalTarget,
 ) -> Result<(Provider<Http>, Bytes, H256), ApiError> {
     let custody_private_key = meta(db, CUSTODY_WALLET_PRIVATE_KEY_KEY)
@@ -3730,6 +3791,21 @@ async fn sign_withdrawal(
         .estimate_gas(&transaction, None)
         .await
         .map_err(chain_error)?;
+    let reservation: Option<String> =
+        sqlx::query_scalar("SELECT gas_reservation_wei FROM withdrawals WHERE id=?1")
+            .bind(withdrawal_id)
+            .fetch_one(db)
+            .await
+            .map_err(db_error)?;
+    if let Some(reservation) = reservation {
+        let budget = U256::from_dec_str(&reservation)
+            .map_err(|_| ApiError::conflict("invalid gas reservation"))?;
+        if gas.checked_mul(gas_price).is_none_or(|cost| cost > budget) {
+            return Err(ApiError::conflict(
+                "gas price exceeds reserved budget; retry later",
+            ));
+        }
+    }
     transaction.set_gas(gas);
     let signature = wallet
         .sign_transaction(&transaction)
@@ -3805,7 +3881,9 @@ async fn record_withdrawal_error(
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    tx.commit().await.map_err(db_error)
+    tx.commit().await.map_err(db_error)?;
+    state.liquidity_cache.lock().await.invalidate();
+    Ok(())
 }
 
 fn signed_raw_transaction(value: &str) -> Result<Bytes, ApiError> {
@@ -4597,6 +4675,11 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             .execute(db)
             .await?;
     }
+    if !table_has_column(db, "withdrawals", "gas_reservation_wei").await? {
+        sqlx::query("ALTER TABLE withdrawals ADD COLUMN gas_reservation_wei TEXT")
+            .execute(db)
+            .await?;
+    }
     if !table_has_column(db, "withdrawals", "signed_transaction").await? {
         sqlx::query("ALTER TABLE withdrawals ADD COLUMN signed_transaction TEXT")
             .execute(db)
@@ -5286,9 +5369,15 @@ mod tests {
         assert_eq!(operation_status, "submitted");
 
         let settlement_lock = Mutex::new(());
-        settle_withdrawal(&db, &settlement_lock, &withdrawal_id, true)
-            .await
-            .unwrap();
+        settle_withdrawal(
+            &db,
+            &settlement_lock,
+            &Mutex::new(liquidity::Cache::default()),
+            &withdrawal_id,
+            true,
+        )
+        .await
+        .unwrap();
         let withdrawal_status: String =
             sqlx::query_scalar("SELECT status FROM withdrawals WHERE id=?1")
                 .bind(&withdrawal_id)
