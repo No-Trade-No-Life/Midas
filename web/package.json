@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
-    "test": "node scripts/check-boundaries.mjs && npm run build"
+    "test": "node scripts/check-boundaries.mjs && node --experimental-strip-types --test scripts/withdrawal-availability.test.mjs && npm run build"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

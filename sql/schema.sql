@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   -- is never returned by an API, and lets an operator safely re-broadcast the
   -- exact same transaction when the RPC outcome was uncertain.
   signed_transaction TEXT,
+  gas_reservation_wei TEXT,
   last_error TEXT,
   status TEXT NOT NULL CHECK (status IN ('awaiting_signer', 'submitted', 'completed', 'failed')),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

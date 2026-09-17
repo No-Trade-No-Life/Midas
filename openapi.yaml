@@ -143,6 +143,20 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/TransferRequest' }
       responses: { '200': { description: Posted transfer }, '409': { description: Insufficient balance } }
+  /withdrawal-availability:
+    get:
+      summary: Authenticated human user's immediate withdrawal capacity; never includes the custody address
+      description: Shared five-second observation cache, with live pending reservations deducted. Submission rechecks fresh RPC data under the reservation lock. Fund API keys are not accepted.
+      parameters:
+        - { name: asset_id, in: query, required: true, schema: { type: string }, example: 1-USDC }
+      responses:
+        '200':
+          description: Ready or safely unavailable, including per-network RPC failures
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WithdrawalAvailability' }
+        '400': { description: Unsupported asset }
+        '401': { description: Human bearer authentication required }
   /withdrawals:
     get:
       summary: Current caller's withdrawals and their chain finality state
@@ -155,7 +169,7 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/WithdrawalRequest' }
-      responses: { '200': { description: Withdrawal accepted before any RPC broadcast wait } }
+      responses: { '200': { description: Withdrawal accepted after fresh liquidity and gas validation, before broadcast }, '409': { description: Insufficient balance, token liquidity, gas, unavailable RPC, or missing custody configuration. No ledger debit or reservation is created. } }
   /withdrawals/{id}/address-book:
     post:
       summary: Save and label a destination already used by the caller's withdrawal
@@ -739,6 +753,20 @@ components:
         last_attempt_at: { type: [string, 'null'], format: date-time }
         last_success_at: { type: [string, 'null'], format: date-time }
         last_error: { type: [string, 'null'] }
+    WithdrawalAvailability:
+      type: object
+      required: [asset_id, chain_id, network_name, asset_symbol, available_amount, available_usd_nanos, status, gas_sufficient, observed_at, reason]
+      properties:
+        asset_id: { type: string }
+        chain_id: { type: integer, format: int64 }
+        network_name: { type: string }
+        asset_symbol: { type: string, enum: [USDC, USDT] }
+        available_amount: { type: string, description: Exact decimal capacity after reservations; zero when unavailable }
+        available_usd_nanos: { type: string, pattern: '^[0-9]+$', description: Exact integer string to avoid JavaScript precision loss }
+        status: { type: string, enum: [ready, unavailable] }
+        gas_sufficient: { type: boolean, nullable: true }
+        observed_at: { type: string, format: date-time, nullable: true }
+        reason: { type: string, nullable: true, enum: [not_configured, rpc_unavailable, pending_gas_unknown, insufficient_gas, insufficient_liquidity] }
     CustodyAssetBalance:
       type: object
       required: [symbol, amount, error]
