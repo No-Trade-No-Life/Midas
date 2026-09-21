@@ -4038,7 +4038,10 @@ fn verified_deposit_transfer(
             amount_usd_nanos,
             raw_amount: amount.to_string(),
             transaction_hash: format!("{transaction_hash:#x}"),
-            log_index: log_index as i64,
+            log_index: log
+                .log_index
+                .map(|index| index.as_u64() as i64)
+                .unwrap_or(log_index as i64),
         });
     }
     Err(ApiError::invalid(format!(
@@ -4317,15 +4320,15 @@ fn token_units_to_usd_nanos(amount: U256, token_decimals: u8) -> Result<i64, Api
     }
     let nanos = if token_decimals >= 9 {
         let scale = U256::exp10((token_decimals - 9) as usize);
-        if amount % scale != U256::zero() {
-            return Err(ApiError::invalid(
-                "the confirmed token amount exceeds Midas's USD nanodollar precision",
-            ));
-        }
         amount / scale
     } else {
         amount * U256::exp10((9 - token_decimals) as usize)
     };
+    if nanos.is_zero() {
+        return Err(ApiError::invalid(
+            "the confirmed token amount is below Midas's USD nanodollar precision",
+        ));
+    }
     if nanos > U256::from(i64::MAX as u64) {
         return Err(ApiError::invalid(
             "the confirmed token amount is outside Midas's USD ledger range",
@@ -5671,6 +5674,51 @@ mod tests {
             builtin_network(56).unwrap().rpc_url,
             "https://bsc-dataseed.binance.org/"
         );
+    }
+
+    #[test]
+    fn credits_the_reported_bsc_usdc_transfer_and_preserves_chain_log_index() {
+        let contract = Address::from_str("0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d").unwrap();
+        let sender = Address::from_str("0xc9f6c7b6d155e61bdbdb30b7dc1484b398ca23d8").unwrap();
+        let recipient = Address::from_str("0xdd66e42d8dee2c8fcf36d07a7e7c95ec8096ca31").unwrap();
+        let mut sender_topic = [0_u8; 32];
+        sender_topic[12..].copy_from_slice(sender.as_bytes());
+        let mut recipient_topic = [0_u8; 32];
+        recipient_topic[12..].copy_from_slice(recipient.as_bytes());
+        let amount = U256::from_dec_str("1534527720959768346267").unwrap();
+        let mut data = [0_u8; 32];
+        amount.to_big_endian(&mut data);
+        let target = DepositTarget {
+            wallet_id: "wallet".to_string(),
+            address: format!("{recipient:#x}"),
+            asset_id: "56-USDC".to_string(),
+            symbol: "USDC".to_string(),
+            contract_address: format!("{contract:#x}"),
+            rpc_url: builtin_network(56).unwrap().rpc_url.to_string(),
+            token_decimals: 18,
+        };
+        let log = Log {
+            address: contract,
+            topics: vec![
+                H256::from(keccak256("Transfer(address,address,uint256)")),
+                H256::from(sender_topic),
+                H256::from(recipient_topic),
+            ],
+            data: data.to_vec().into(),
+            log_index: Some(627_u64.into()),
+            ..Default::default()
+        };
+
+        let verified = verified_deposit_transfer(
+            &target,
+            H256::from_str("0x0a0bc0da8dbab3ef5e6f297e24133906f15543b97b98cac322db79227129de8c")
+                .unwrap(),
+            &[log],
+        )
+        .unwrap();
+        assert_eq!(verified.amount_usd_nanos, 1_534_527_720_959);
+        assert_eq!(verified.raw_amount, "1534527720959768346267");
+        assert_eq!(verified.log_index, 627);
     }
 
     #[tokio::test]
