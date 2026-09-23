@@ -84,6 +84,25 @@ CREATE TABLE IF NOT EXISTS deposit_discovery_cursors (
   PRIMARY KEY(wallet_address_id, chain_id)
 );
 
+-- Balance-snapshot deposit discovery. Midas periodically reads each human
+-- deposit address's USDC/USDT balances and only scans a bounded recent
+-- Transfer-log range when a balance change or reconciliation gap needs the
+-- transaction hash resolved. One row per deposit address, chain, and asset.
+CREATE TABLE IF NOT EXISTS wallet_asset_snapshots (
+  wallet_address_id TEXT NOT NULL REFERENCES wallet_addresses(id) ON DELETE CASCADE,
+  chain_id INTEGER NOT NULL REFERENCES evm_networks(chain_id),
+  asset_id TEXT NOT NULL REFERENCES supported_assets(id),
+  raw_amount TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  locate_pending INTEGER NOT NULL DEFAULT 0 CHECK (locate_pending IN (0, 1)),
+  locate_scan_blocks INTEGER NOT NULL DEFAULT 5000 CHECK (locate_scan_blocks >= 0),
+  locate_attempts INTEGER NOT NULL DEFAULT 0 CHECK (locate_attempts >= 0),
+  last_locate_at TEXT,
+  last_locate_error TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(wallet_address_id, chain_id, asset_id)
+);
+
 CREATE TABLE IF NOT EXISTS ledger_entries (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
@@ -251,6 +270,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS deposits_transaction_hash_unique_idx
   ON deposits(transaction_hash);
 CREATE INDEX IF NOT EXISTS deposit_discovery_cursors_last_attempt_idx
   ON deposit_discovery_cursors(last_attempt_at ASC, wallet_address_id, chain_id);
+CREATE INDEX IF NOT EXISTS wallet_asset_snapshots_chain_pending_idx
+  ON wallet_asset_snapshots(chain_id, locate_pending);
 CREATE INDEX IF NOT EXISTS withdrawals_user_created_idx
   ON withdrawals(user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS address_book_entries_user_chain_idx

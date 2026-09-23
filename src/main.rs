@@ -18,7 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ethers::{
     contract::abigen,
     middleware::SignerMiddleware,
@@ -66,10 +66,12 @@ const DEFAULT_GAS_FUNDING_WEI: &str = "1000000000000000";
 // A human-user deposit key is EVM-compatible, so new rows use this internal
 // sentinel and no API or query exposes it as a per-chain choice.
 const EVM_ADDRESS_SENTINEL_CHAIN_ID: i64 = 1;
-const DEPOSIT_DISCOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const RPC_DISCOVERY_BOOTSTRAP_BLOCKS: i64 = 1_024;
-const RPC_DISCOVERY_BLOCK_RANGE: i64 = 50;
-const RPC_DISCOVERY_CONFIRMATION_BLOCKS: i64 = 2;
+const DEPOSIT_BALANCE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const LOCATE_CONFIRMATION_BLOCKS: i64 = 2;
+const LOCATE_INITIAL_SCAN_BLOCKS: i64 = 5_000;
+const LOCATE_MAX_SCAN_BLOCKS: i64 = 500_000;
+const DEPOSIT_DISCOVERY_STALE_SECONDS: i64 = 300;
+const DEPOSIT_DISCOVERY_RETRY_MAX_SECONDS: i64 = 1_800;
 const ETHEREUM_DISCOVERY_RPC_URL: &str = "https://rpc.mevblocker.io";
 const BSC_DISCOVERY_RPC_URL: &str = "https://bsc-rpc.publicnode.com";
 const USD_LEDGER_COLUMNS: [(&str, &str, &str); 5] = [
@@ -373,9 +375,36 @@ struct EvmConfigInput {
 #[derive(Serialize)]
 struct DepositDiscoveryStatus {
     polling_interval_seconds: u64,
-    last_attempt_at: Option<String>,
-    last_success_at: Option<String>,
+    initial_scan_blocks: i64,
+    heartbeat_at: Option<String>,
+    chains: Vec<DepositDiscoveryChainStatus>,
+    problems: Vec<DepositDiscoveryProblem>,
+}
+
+#[derive(Serialize)]
+struct DepositDiscoveryChainStatus {
+    chain_id: i64,
+    name: String,
+    enabled: bool,
+    wallet_count: i64,
+    checked_at: Option<String>,
+    reconciliation_gap_count: i64,
+    pending_locate_count: i64,
     last_error: Option<String>,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct DepositDiscoveryProblem {
+    address: String,
+    user_id: String,
+    chain_id: i64,
+    network_name: String,
+    symbol: String,
+    amount: String,
+    kind: String,
+    last_error: Option<String>,
+    since: String,
 }
 
 #[derive(Serialize)]
@@ -604,13 +633,31 @@ struct DiscoveryTarget {
     user_id: String,
     address: String,
     chain_id: i64,
-    next_block_number: i64,
-    last_seen_block_number: i64,
 }
 
-struct DiscoveryCursorPosition {
-    next_block_number: i64,
-    last_seen_block_number: i64,
+struct DepositWallet {
+    id: String,
+    user_id: String,
+    address: String,
+}
+
+struct BalanceSnapshot {
+    raw_amount: String,
+    locate_pending: bool,
+    locate_scan_blocks: i64,
+    locate_attempts: i64,
+    last_locate_at: Option<String>,
+    last_locate_error: Option<String>,
+}
+
+struct BalanceSnapshotUpdate {
+    raw_amount: String,
+    checked_at: String,
+    locate_pending: bool,
+    locate_scan_blocks: i64,
+    locate_attempts: i64,
+    last_locate_at: Option<String>,
+    last_locate_error: Option<String>,
 }
 
 struct DiscoveredTransfer {
@@ -1440,127 +1487,471 @@ fn spawn_deposit_sweep(state: AppState, deposit_id: String) {
 
 fn start_deposit_discovery(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = time::interval(DEPOSIT_DISCOVERY_POLL_INTERVAL);
+        let mut interval = time::interval(DEPOSIT_BALANCE_POLL_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            if let Err(error) = discover_next_deposit(&state).await {
-                eprintln!("RPC deposit discovery cycle failed: {}", error.message);
+            if let Err(error) = run_deposit_discovery_cycle(&state).await {
+                eprintln!("deposit discovery cycle failed: {}", error.message);
             }
         }
     });
 }
 
-async fn discover_next_deposit(state: &AppState) -> Result<(), ApiError> {
-    let Some(target) = next_discovery_target(&state.db).await? else {
-        return Ok(());
-    };
-    let outcome: Result<DiscoveryCursorPosition, ApiError> = async {
-        let (transfers, position) = rpc_discovery_transfers(&target).await?;
-        process_discovered_transfers(state, &target, &transfers).await?;
-        Ok(position)
-    }
-    .await;
-    match outcome {
-        Ok(position) => record_discovery_success(state, &target, &position).await,
-        Err(error) => {
-            record_discovery_failure(state, &target, &error.message).await?;
-            Err(error)
+async fn run_deposit_discovery_cycle(state: &AppState) -> Result<(), ApiError> {
+    let chain_ids: Vec<i64> =
+        sqlx::query_scalar("SELECT chain_id FROM evm_networks WHERE enabled=1 ORDER BY chain_id")
+            .fetch_all(&state.db)
+            .await
+            .map_err(db_error)?;
+    for chain_id in chain_ids {
+        if let Err(error) = refresh_chain_deposit_balances(state, chain_id).await {
+            eprintln!(
+                "deposit discovery for chain {chain_id} failed: {}",
+                error.message
+            );
         }
     }
+    Ok(())
 }
 
-async fn next_discovery_target(db: &SqlitePool) -> Result<Option<DiscoveryTarget>, ApiError> {
-    let row = sqlx::query("SELECT w.id,w.user_id,w.address,n.chain_id,COALESCE(c.next_block_number,0),COALESCE(c.last_seen_block_number,0) FROM wallet_addresses w JOIN users u ON u.id=w.user_id AND u.kind='human' JOIN wallet_private_keys k ON k.wallet_address_id=w.id CROSS JOIN evm_networks n LEFT JOIN deposit_discovery_cursors c ON c.wallet_address_id=w.id AND c.chain_id=n.chain_id WHERE n.enabled=1 ORDER BY CASE WHEN c.last_attempt_at IS NULL THEN 0 ELSE 1 END,c.last_attempt_at,w.created_at,w.id,n.chain_id LIMIT 1")
-        .fetch_optional(db)
-        .await
-        .map_err(db_error)?;
-    Ok(row.map(|row| DiscoveryTarget {
-        wallet_id: row.get(0),
-        user_id: row.get(1),
-        address: row.get(2),
-        chain_id: row.get(3),
-        next_block_number: row.get(4),
-        last_seen_block_number: row.get(5),
-    }))
-}
-
-async fn rpc_discovery_transfers(
-    target: &DiscoveryTarget,
-) -> Result<(Vec<DiscoveredTransfer>, DiscoveryCursorPosition), ApiError> {
-    let network =
-        builtin_network(target.chain_id).expect("discovery target uses a built-in EVM network");
+/// Balance-driven discovery for one chain: read every human deposit address's
+/// USDC/USDT balance, settle submitted sweeps so reconciliation stays exact,
+/// and only run a bounded recent Transfer-log scan when a balance change or
+/// reconciliation gap needs its transaction hash resolved.
+async fn refresh_chain_deposit_balances(state: &AppState, chain_id: i64) -> Result<(), ApiError> {
+    let network = builtin_network(chain_id).expect("enabled discovery networks are built-in");
     let provider = rpc_provider(discovery_rpc_url(network))?;
+    finalize_submitted_sweeps(state, &provider, chain_id).await?;
     let head_block = provider
         .get_block_number()
         .await
         .map_err(chain_error)?
         .as_u64() as i64;
-    let latest_block = head_block.saturating_sub(RPC_DISCOVERY_CONFIRMATION_BLOCKS);
-    let Some((start_block, end_block)) =
-        rpc_discovery_range(target.next_block_number, latest_block)
-    else {
-        return Ok((
-            Vec::new(),
-            DiscoveryCursorPosition {
-                next_block_number: target.next_block_number,
-                last_seen_block_number: target.last_seen_block_number,
-            },
-        ));
-    };
-    let contracts: Vec<&str> = BUILTIN_ASSETS
+    let wallets = human_deposit_wallets(&state.db).await?;
+    if wallets.is_empty() {
+        return Ok(());
+    }
+    let assets: Vec<BuiltinAsset> = BUILTIN_ASSETS
         .iter()
-        .filter(|asset| asset.chain_id == target.chain_id)
-        .map(|asset| asset.contract_address)
+        .copied()
+        .filter(|asset| asset.chain_id == chain_id)
         .collect();
-    let recipient = parse_address(&target.address, "stored deposit address")?;
-    let mut recipient_topic = [0_u8; 32];
-    recipient_topic[12..].copy_from_slice(recipient.as_bytes());
-    let filter = serde_json::json!({
-        "fromBlock": format!("0x{start_block:x}"),
-        "toBlock": format!("0x{end_block:x}"),
-        "address": contracts,
-        "topics": [
-            format!("{:#x}", H256::from(keccak256("Transfer(address,address,uint256)"))),
-            serde_json::Value::Null,
-            format!("{:#x}", H256::from(recipient_topic)),
-        ],
-    });
-    let logs: Vec<Log> = provider
-        .request("eth_getLogs", [filter])
-        .await
-        .map_err(chain_error)?;
-    let transfers = logs
-        .into_iter()
-        .filter_map(|log| {
-            Some(DiscoveredTransfer {
-                hash: format!("{:#x}", log.transaction_hash?),
-                contract_address: format!("{:#x}", log.address),
-            })
-        })
-        .collect();
-    Ok((
-        transfers,
-        DiscoveryCursorPosition {
-            next_block_number: end_block.saturating_add(1),
-            last_seen_block_number: end_block,
-        },
-    ))
+    let unswept = load_unswept_deposit_amounts(&state.db, Some(chain_id)).await?;
+    let snapshots = load_balance_snapshots(&state.db, chain_id).await?;
+    let mut read_error: Option<String> = None;
+    for wallet in &wallets {
+        for asset in &assets {
+            let key = (wallet.id.clone(), asset.id.to_string());
+            let raw = match read_token_balance(&provider, *asset, &wallet.address).await {
+                Ok(raw) => raw,
+                Err(error) => {
+                    read_error.get_or_insert(error.message);
+                    continue;
+                }
+            };
+            let raw_text = raw.to_string();
+            let previous = snapshots.get(&key);
+            let unswept_amount = unswept
+                .get(&key)
+                .copied()
+                .unwrap_or_else(U256::zero)
+                .to_string();
+            let locate_pending = previous
+                .map(|snapshot| snapshot.locate_pending)
+                .unwrap_or(false);
+            let trigger = balance_locate_trigger(
+                &raw_text,
+                previous.map(|snapshot| snapshot.raw_amount.as_str()),
+                &unswept_amount,
+                locate_pending,
+            );
+            let now = Utc::now().to_rfc3339();
+            if !trigger {
+                save_balance_snapshot(
+                    state,
+                    chain_id,
+                    &wallet.id,
+                    asset.id,
+                    BalanceSnapshotUpdate {
+                        raw_amount: raw_text,
+                        checked_at: now,
+                        locate_pending: false,
+                        locate_scan_blocks: LOCATE_INITIAL_SCAN_BLOCKS,
+                        locate_attempts: 0,
+                        last_locate_at: previous
+                            .and_then(|snapshot| snapshot.last_locate_at.clone()),
+                        last_locate_error: None,
+                    },
+                )
+                .await?;
+                continue;
+            }
+            let attempts = previous
+                .map(|snapshot| snapshot.locate_attempts)
+                .unwrap_or(0);
+            let last_locate_at = previous.and_then(|snapshot| snapshot.last_locate_at.clone());
+            let scan_blocks = match previous {
+                Some(snapshot) if snapshot.locate_pending => snapshot.locate_scan_blocks,
+                _ => LOCATE_INITIAL_SCAN_BLOCKS,
+            };
+            if !locate_retry_ready(attempts, last_locate_at.as_deref(), Utc::now()) {
+                save_balance_snapshot(
+                    state,
+                    chain_id,
+                    &wallet.id,
+                    asset.id,
+                    BalanceSnapshotUpdate {
+                        raw_amount: raw_text,
+                        checked_at: now,
+                        locate_pending: true,
+                        locate_scan_blocks: scan_blocks,
+                        locate_attempts: attempts,
+                        last_locate_at,
+                        last_locate_error: previous
+                            .and_then(|snapshot| snapshot.last_locate_error.clone()),
+                    },
+                )
+                .await?;
+                continue;
+            }
+            let target = DiscoveryTarget {
+                wallet_id: wallet.id.clone(),
+                user_id: wallet.user_id.clone(),
+                address: wallet.address.clone(),
+                chain_id,
+            };
+            let outcome = locate_deposits_from_balance(
+                state,
+                &provider,
+                &target,
+                *asset,
+                head_block,
+                scan_blocks,
+                &raw_text,
+            )
+            .await;
+            let update = match outcome {
+                Ok(true) => BalanceSnapshotUpdate {
+                    raw_amount: raw_text,
+                    checked_at: now.clone(),
+                    locate_pending: false,
+                    locate_scan_blocks: LOCATE_INITIAL_SCAN_BLOCKS,
+                    locate_attempts: 0,
+                    last_locate_at: Some(now),
+                    last_locate_error: None,
+                },
+                Ok(false) => BalanceSnapshotUpdate {
+                    raw_amount: raw_text,
+                    checked_at: now.clone(),
+                    locate_pending: true,
+                    locate_scan_blocks: next_locate_scan_blocks(scan_blocks),
+                    locate_attempts: 0,
+                    last_locate_at: Some(now),
+                    last_locate_error: Some(
+                        "balance exceeds the credited ledger within the scan window".to_string(),
+                    ),
+                },
+                Err(error) => BalanceSnapshotUpdate {
+                    raw_amount: raw_text,
+                    checked_at: now.clone(),
+                    locate_pending: true,
+                    locate_scan_blocks: scan_blocks,
+                    locate_attempts: attempts.saturating_add(1),
+                    last_locate_at: Some(now),
+                    last_locate_error: Some(error.message),
+                },
+            };
+            save_balance_snapshot(state, chain_id, &wallet.id, asset.id, update).await?;
+        }
+    }
+    if let Some(message) = read_error {
+        return Err(ApiError::new(StatusCode::BAD_GATEWAY, message));
+    }
+    Ok(())
 }
 
-fn rpc_discovery_range(next_block_number: i64, latest_block: i64) -> Option<(i64, i64)> {
-    let start_block = if next_block_number == 0 {
-        latest_block.saturating_sub(RPC_DISCOVERY_BOOTSTRAP_BLOCKS - 1)
-    } else {
-        next_block_number
-    };
-    if start_block > latest_block {
-        return None;
+/// Marks submitted sweeps as swept (or failed) from their token transfer
+/// receipt so balance reconciliation always reflects what is really still in
+/// the deposit address.
+async fn finalize_submitted_sweeps(
+    state: &AppState,
+    provider: &Provider<Http>,
+    chain_id: i64,
+) -> Result<(), ApiError> {
+    let rows = sqlx::query(
+        "SELECT d.id,s.token_transaction_hash FROM deposits d JOIN deposit_sweeps s ON s.deposit_id=d.id JOIN supported_assets a ON a.id=d.asset_id WHERE a.chain_id=?1 AND s.status='submitted' ORDER BY s.updated_at LIMIT 100",
+    )
+    .bind(chain_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_error)?;
+    for row in rows {
+        let deposit_id: String = row.get(0);
+        let Some(hash) = row.get::<Option<String>, _>(1) else {
+            continue;
+        };
+        let Ok(transaction_hash) = H256::from_str(&hash) else {
+            continue;
+        };
+        let receipt = match provider.get_transaction_receipt(transaction_hash).await {
+            Ok(Some(receipt)) => receipt,
+            _ => continue,
+        };
+        let now = Utc::now().to_rfc3339();
+        let _write = state.write_lock.lock().await;
+        if receipt.status.map(|status| status.as_u64()) == Some(1) {
+            sqlx::query("UPDATE deposit_sweeps SET status='swept',error_message=NULL,updated_at=?1 WHERE deposit_id=?2 AND status='submitted'")
+                .bind(&now)
+                .bind(&deposit_id)
+                .execute(&state.db)
+                .await
+                .map_err(db_error)?;
+            sqlx::query(
+                "UPDATE deposits SET sweep_status='swept' WHERE id=?1 AND sweep_status='submitted'",
+            )
+            .bind(&deposit_id)
+            .execute(&state.db)
+            .await
+            .map_err(db_error)?;
+        } else {
+            sqlx::query("UPDATE deposit_sweeps SET status='failed',error_message='the token collection transaction reverted',updated_at=?1 WHERE deposit_id=?2 AND status='submitted'")
+                .bind(&now)
+                .bind(&deposit_id)
+                .execute(&state.db)
+                .await
+                .map_err(db_error)?;
+            sqlx::query("UPDATE deposits SET sweep_status='failed' WHERE id=?1 AND sweep_status='submitted'")
+                .bind(&deposit_id)
+                .execute(&state.db)
+                .await
+                .map_err(db_error)?;
+        }
     }
-    Some((
-        start_block,
-        latest_block.min(start_block.saturating_add(RPC_DISCOVERY_BLOCK_RANGE - 1)),
-    ))
+    Ok(())
+}
+
+async fn human_deposit_wallets(db: &SqlitePool) -> Result<Vec<DepositWallet>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT w.id,w.user_id,w.address FROM wallet_addresses w JOIN users u ON u.id=w.user_id AND u.kind='human' ORDER BY w.created_at,w.id",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(db_error)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| DepositWallet {
+            id: row.get(0),
+            user_id: row.get(1),
+            address: row.get(2),
+        })
+        .collect())
+}
+
+async fn load_balance_snapshots(
+    db: &SqlitePool,
+    chain_id: i64,
+) -> Result<HashMap<(String, String), BalanceSnapshot>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT wallet_address_id,asset_id,raw_amount,locate_pending,locate_scan_blocks,locate_attempts,last_locate_at,last_locate_error FROM wallet_asset_snapshots WHERE chain_id=?1",
+    )
+    .bind(chain_id)
+    .fetch_all(db)
+    .await
+    .map_err(db_error)?;
+    let mut snapshots = HashMap::new();
+    for row in rows {
+        snapshots.insert(
+            (row.get(0), row.get(1)),
+            BalanceSnapshot {
+                raw_amount: row.get(2),
+                locate_pending: row.get::<i64, _>(3) != 0,
+                locate_scan_blocks: row.get(4),
+                locate_attempts: row.get(5),
+                last_locate_at: row.get(6),
+                last_locate_error: row.get(7),
+            },
+        );
+    }
+    Ok(snapshots)
+}
+
+async fn save_balance_snapshot(
+    state: &AppState,
+    chain_id: i64,
+    wallet_id: &str,
+    asset_id: &str,
+    update: BalanceSnapshotUpdate,
+) -> Result<(), ApiError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO wallet_asset_snapshots(wallet_address_id,chain_id,asset_id,raw_amount,checked_at,locate_pending,locate_scan_blocks,locate_attempts,last_locate_at,last_locate_error,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(wallet_address_id,chain_id,asset_id) DO UPDATE SET raw_amount=excluded.raw_amount,checked_at=excluded.checked_at,locate_pending=excluded.locate_pending,locate_scan_blocks=excluded.locate_scan_blocks,locate_attempts=excluded.locate_attempts,last_locate_at=excluded.last_locate_at,last_locate_error=excluded.last_locate_error,updated_at=excluded.updated_at",
+    )
+    .bind(wallet_id)
+    .bind(chain_id)
+    .bind(asset_id)
+    .bind(&update.raw_amount)
+    .bind(&update.checked_at)
+    .bind(i64::from(update.locate_pending))
+    .bind(update.locate_scan_blocks)
+    .bind(update.locate_attempts)
+    .bind(&update.last_locate_at)
+    .bind(&update.last_locate_error)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(db_error)?;
+    Ok(())
+}
+
+async fn load_unswept_deposit_amounts(
+    db: &SqlitePool,
+    chain_id: Option<i64>,
+) -> Result<HashMap<(String, String), U256>, ApiError> {
+    let rows = match chain_id {
+        Some(chain_id) => sqlx::query(
+            "SELECT d.wallet_address_id,d.asset_id,d.raw_amount FROM deposits d JOIN supported_assets a ON a.id=d.asset_id AND a.chain_id=?1 WHERE d.sweep_status != 'swept'",
+        )
+        .bind(chain_id)
+        .fetch_all(db)
+        .await
+        .map_err(db_error)?,
+        None => sqlx::query(
+            "SELECT d.wallet_address_id,d.asset_id,d.raw_amount FROM deposits d WHERE d.sweep_status != 'swept'",
+        )
+        .fetch_all(db)
+        .await
+        .map_err(db_error)?,
+    };
+    let mut totals: HashMap<(String, String), U256> = HashMap::new();
+    for row in rows {
+        let amount = U256::from_dec_str(&row.get::<String, _>(2)).unwrap_or_else(|_| U256::zero());
+        let total = totals
+            .entry((row.get(0), row.get(1)))
+            .or_insert_with(U256::zero);
+        *total = total.saturating_add(amount);
+    }
+    Ok(totals)
+}
+
+async fn load_unswept_deposit_amount(
+    db: &SqlitePool,
+    wallet_id: &str,
+    asset_id: &str,
+) -> Result<U256, ApiError> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT raw_amount FROM deposits WHERE wallet_address_id=?1 AND asset_id=?2 AND sweep_status != 'swept'",
+    )
+    .bind(wallet_id)
+    .bind(asset_id)
+    .fetch_all(db)
+    .await
+    .map_err(db_error)?;
+    Ok(rows
+        .into_iter()
+        .map(|value| U256::from_dec_str(&value).unwrap_or_else(|_| U256::zero()))
+        .fold(U256::zero(), |total, amount| total.saturating_add(amount)))
+}
+
+async fn read_token_balance(
+    provider: &Provider<Http>,
+    asset: BuiltinAsset,
+    wallet_address: &str,
+) -> Result<U256, ApiError> {
+    let contract = parse_address(asset.contract_address, "configured token contract")?;
+    let address = parse_address(wallet_address, "stored deposit address")?;
+    let token = Erc20::new(contract, Arc::new(provider.clone()));
+    token.balance_of(address).call().await.map_err(chain_error)
+}
+
+/// Resolves the transaction hashes behind a balance change by scanning a
+/// bounded recent Transfer-log range, verifies each candidate from its
+/// receipt, and reports whether the address balance is now fully explained by
+/// the credited ledger.
+async fn locate_deposits_from_balance(
+    state: &AppState,
+    provider: &Provider<Http>,
+    target: &DiscoveryTarget,
+    asset: BuiltinAsset,
+    head_block: i64,
+    scan_blocks: i64,
+    raw_amount: &str,
+) -> Result<bool, ApiError> {
+    if let Some((from_block, to_block)) = locate_scan_range(head_block, scan_blocks) {
+        let recipient = parse_address(&target.address, "stored deposit address")?;
+        let mut recipient_topic = [0_u8; 32];
+        recipient_topic[12..].copy_from_slice(recipient.as_bytes());
+        let filter = serde_json::json!({
+            "fromBlock": format!("0x{from_block:x}"),
+            "toBlock": format!("0x{to_block:x}"),
+            "address": [asset.contract_address],
+            "topics": [
+                format!("{:#x}", H256::from(keccak256("Transfer(address,address,uint256)"))),
+                serde_json::Value::Null,
+                format!("{:#x}", H256::from(recipient_topic)),
+            ],
+        });
+        let logs: Vec<Log> = provider
+            .request("eth_getLogs", [filter])
+            .await
+            .map_err(chain_error)?;
+        let transfers: Vec<DiscoveredTransfer> = logs
+            .into_iter()
+            .filter_map(|log| {
+                Some(DiscoveredTransfer {
+                    hash: format!("{:#x}", log.transaction_hash?),
+                    contract_address: format!("{:#x}", log.address),
+                })
+            })
+            .collect();
+        process_discovered_transfers(state, target, &transfers).await?;
+    }
+    let unswept = load_unswept_deposit_amount(&state.db, &target.wallet_id, asset.id).await?;
+    let raw = U256::from_dec_str(raw_amount)
+        .map_err(|_| ApiError::invalid("stored balance is not a valid integer"))?;
+    Ok(raw <= unswept)
+}
+
+fn balance_locate_trigger(
+    raw_amount: &str,
+    previous_amount: Option<&str>,
+    unswept_amount: &str,
+    locate_pending: bool,
+) -> bool {
+    if locate_pending {
+        return true;
+    }
+    let raw = U256::from_dec_str(raw_amount).unwrap_or_else(|_| U256::zero());
+    let unswept = U256::from_dec_str(unswept_amount).unwrap_or_else(|_| U256::zero());
+    match previous_amount.and_then(|value| U256::from_dec_str(value).ok()) {
+        Some(previous) => raw != previous || raw > unswept,
+        None => !raw.is_zero() || raw > unswept,
+    }
+}
+
+fn locate_scan_range(head_block: i64, scan_blocks: i64) -> Option<(i64, i64)> {
+    let to_block = head_block.saturating_sub(LOCATE_CONFIRMATION_BLOCKS);
+    let from_block = to_block
+        .saturating_sub(scan_blocks.saturating_sub(1))
+        .max(0);
+    (from_block <= to_block).then_some((from_block, to_block))
+}
+
+fn next_locate_scan_blocks(scan_blocks: i64) -> i64 {
+    scan_blocks.saturating_mul(2).min(LOCATE_MAX_SCAN_BLOCKS)
+}
+
+fn locate_retry_ready(attempts: i64, last_locate_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    if attempts < 3 {
+        return true;
+    }
+    let Some(last) = last_locate_at.and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return true;
+    };
+    let exponent = (attempts - 3).min(5) as u32;
+    let delay = (60_i64 << exponent).min(DEPOSIT_DISCOVERY_RETRY_MAX_SECONDS);
+    now >= last.with_timezone(&Utc) + chrono::Duration::seconds(delay)
 }
 
 fn discovery_rpc_url(network: BuiltinEvmNetwork) -> &'static str {
@@ -1612,46 +2003,6 @@ async fn process_discovered_transfers(
             spawn_deposit_sweep(state.clone(), deposit_id);
         }
     }
-    Ok(())
-}
-
-async fn record_discovery_success(
-    state: &AppState,
-    target: &DiscoveryTarget,
-    position: &DiscoveryCursorPosition,
-) -> Result<(), ApiError> {
-    let _write = state.write_lock.lock().await;
-    let now = Utc::now().to_rfc3339();
-    sqlx::query("INSERT INTO deposit_discovery_cursors(wallet_address_id,chain_id,next_block_number,last_seen_block_number,last_attempt_at,last_success_at,last_error,updated_at) VALUES(?1,?2,?3,?4,?5,?5,NULL,?5) ON CONFLICT(wallet_address_id,chain_id) DO UPDATE SET next_block_number=excluded.next_block_number,last_seen_block_number=excluded.last_seen_block_number,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error=NULL,updated_at=excluded.updated_at")
-        .bind(&target.wallet_id)
-        .bind(target.chain_id)
-        .bind(position.next_block_number)
-        .bind(position.last_seen_block_number)
-        .bind(&now)
-        .execute(&state.db)
-        .await
-        .map_err(db_error)?;
-    Ok(())
-}
-
-async fn record_discovery_failure(
-    state: &AppState,
-    target: &DiscoveryTarget,
-    error_message: &str,
-) -> Result<(), ApiError> {
-    let _write = state.write_lock.lock().await;
-    let now = Utc::now().to_rfc3339();
-    let error_message: String = error_message.chars().take(500).collect();
-    sqlx::query("INSERT INTO deposit_discovery_cursors(wallet_address_id,chain_id,next_block_number,last_seen_block_number,last_attempt_at,last_success_at,last_error,updated_at) VALUES(?1,?2,?3,?4,?5,NULL,?6,?5) ON CONFLICT(wallet_address_id,chain_id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,last_error=excluded.last_error,updated_at=excluded.updated_at")
-        .bind(&target.wallet_id)
-        .bind(target.chain_id)
-        .bind(target.next_block_number)
-        .bind(target.last_seen_block_number)
-        .bind(&now)
-        .bind(error_message)
-        .execute(&state.db)
-        .await
-        .map_err(db_error)?;
     Ok(())
 }
 
@@ -2987,16 +3338,153 @@ async fn read_deposit_discovery_status(
 async fn load_deposit_discovery_status(
     db: &SqlitePool,
 ) -> Result<DepositDiscoveryStatus, ApiError> {
-    let row = sqlx::query("SELECT last_attempt_at,last_success_at,last_error FROM deposit_discovery_cursors WHERE last_attempt_at IS NOT NULL ORDER BY last_attempt_at DESC,wallet_address_id,chain_id LIMIT 1")
-        .fetch_optional(db)
+    let networks = sqlx::query("SELECT chain_id,name,enabled FROM evm_networks ORDER BY chain_id")
+        .fetch_all(db)
         .await
         .map_err(db_error)?;
+    let wallet_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallet_addresses w JOIN users u ON u.id=w.user_id AND u.kind='human'",
+    )
+    .fetch_one(db)
+    .await
+    .map_err(db_error)?;
+    let snapshots = sqlx::query(
+        "SELECT s.chain_id,s.wallet_address_id,s.asset_id,s.raw_amount,s.checked_at,s.locate_pending,s.last_locate_error,s.updated_at,w.address,w.user_id FROM wallet_asset_snapshots s JOIN wallet_addresses w ON w.id=s.wallet_address_id ORDER BY s.chain_id,w.address,s.asset_id",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(db_error)?;
+    let unswept = load_unswept_deposit_amounts(db, None).await?;
+    let now = Utc::now();
+    let mut heartbeat_at: Option<String> = None;
+    let mut chains = Vec::new();
+    let mut problems = Vec::new();
+    for network in &networks {
+        let chain_id: i64 = network.get(0);
+        let name: String = network.get(1);
+        let enabled: i64 = network.get(2);
+        let mut checked_at: Option<String> = None;
+        let mut reconciliation_gap_count = 0_i64;
+        let mut pending_locate_count = 0_i64;
+        let mut last_error: Option<(String, String)> = None;
+        for row in snapshots
+            .iter()
+            .filter(|row| row.get::<i64, _>(0) == chain_id)
+        {
+            let wallet_id: String = row.get(1);
+            let asset_id: String = row.get(2);
+            let raw_amount: String = row.get(3);
+            let row_checked_at: String = row.get(4);
+            let locate_pending = row.get::<i64, _>(5) != 0;
+            let row_error: Option<String> = row.get(6);
+            let updated_at: String = row.get(7);
+            if checked_at
+                .as_deref()
+                .is_none_or(|current| row_checked_at.as_str() > current)
+            {
+                checked_at = Some(row_checked_at.clone());
+            }
+            if let Some(message) = row_error.clone()
+                && last_error
+                    .as_ref()
+                    .is_none_or(|(stamp, _)| updated_at.as_str() > stamp.as_str())
+            {
+                last_error = Some((updated_at.clone(), message));
+            }
+            let raw = U256::from_dec_str(&raw_amount).unwrap_or_else(|_| U256::zero());
+            let expected = unswept
+                .get(&(wallet_id, asset_id.clone()))
+                .copied()
+                .unwrap_or_else(U256::zero);
+            let reconciliation_gap = raw > expected;
+            if reconciliation_gap {
+                reconciliation_gap_count += 1;
+            }
+            if locate_pending {
+                pending_locate_count += 1;
+            }
+            if reconciliation_gap || locate_pending {
+                let asset = builtin_asset(&asset_id);
+                problems.push(DepositDiscoveryProblem {
+                    address: row.get(8),
+                    user_id: row.get(9),
+                    chain_id,
+                    network_name: name.clone(),
+                    symbol: asset
+                        .map(|asset| asset.symbol.to_string())
+                        .unwrap_or_default(),
+                    amount: asset
+                        .map(|asset| format_token_amount(raw, asset.token_decimals))
+                        .unwrap_or(raw_amount),
+                    kind: if reconciliation_gap {
+                        "reconciliation_gap"
+                    } else {
+                        "locate_pending"
+                    }
+                    .to_string(),
+                    last_error: row_error,
+                    since: row_checked_at,
+                });
+            }
+        }
+        if let Some(stamp) = checked_at.clone()
+            && heartbeat_at
+                .as_deref()
+                .is_none_or(|current| stamp.as_str() > current)
+        {
+            heartbeat_at = Some(stamp);
+        }
+        let status = if wallet_count == 0 {
+            "no_wallets"
+        } else if checked_at.is_none() {
+            "waiting"
+        } else if reconciliation_gap_count + pending_locate_count > 0 {
+            "attention"
+        } else if deposit_discovery_stale(checked_at.as_deref(), now) {
+            "stale"
+        } else {
+            "ok"
+        };
+        chains.push(DepositDiscoveryChainStatus {
+            chain_id,
+            name,
+            enabled: enabled != 0,
+            wallet_count,
+            checked_at,
+            reconciliation_gap_count,
+            pending_locate_count,
+            last_error: last_error.map(|(_, message)| message),
+            status: status.to_string(),
+        });
+    }
+    problems.sort_by(|left, right| {
+        left.chain_id
+            .cmp(&right.chain_id)
+            .then_with(|| right.kind.cmp(&left.kind))
+            .then_with(|| left.address.cmp(&right.address))
+    });
+    problems.truncate(50);
     Ok(DepositDiscoveryStatus {
-        polling_interval_seconds: DEPOSIT_DISCOVERY_POLL_INTERVAL.as_secs(),
-        last_attempt_at: row.as_ref().map(|row| row.get(0)).unwrap_or(None),
-        last_success_at: row.as_ref().map(|row| row.get(1)).unwrap_or(None),
-        last_error: row.as_ref().map(|row| row.get(2)).unwrap_or(None),
+        polling_interval_seconds: DEPOSIT_BALANCE_POLL_INTERVAL.as_secs(),
+        initial_scan_blocks: LOCATE_INITIAL_SCAN_BLOCKS,
+        heartbeat_at,
+        chains,
+        problems,
     })
+}
+
+fn deposit_discovery_stale(checked_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    let Some(value) = checked_at else {
+        return false;
+    };
+    match DateTime::parse_from_rfc3339(value) {
+        Ok(checked) => {
+            now.signed_duration_since(checked.with_timezone(&Utc))
+                .num_seconds()
+                > DEPOSIT_DISCOVERY_STALE_SECONDS
+        }
+        Err(_) => true,
+    }
 }
 
 async fn read_custody_balances(
@@ -4712,6 +5200,11 @@ async fn remove_fund_user_wallet_keys(db: &SqlitePool) -> anyhow::Result<()> {
     .execute(&mut *tx)
     .await?;
     sqlx::query(&format!(
+        "DELETE FROM wallet_asset_snapshots WHERE wallet_address_id IN ({fund_wallets})"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(&format!(
         "DELETE FROM wallet_private_keys WHERE wallet_address_id IN ({fund_wallets})"
     ))
     .execute(&mut *tx)
@@ -4886,6 +5379,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cursor_table, "deposit_discovery_cursors");
+        let snapshot_table: String = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='wallet_asset_snapshots'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(snapshot_table, "wallet_asset_snapshots");
         let deposit_transaction_index: String = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='deposits_transaction_hash_unique_idx'",
         )
@@ -5121,10 +5621,13 @@ mod tests {
     }
 
     #[test]
-    fn bounds_rpc_discovery_and_resumes_from_the_saved_cursor() {
-        assert_eq!(rpc_discovery_range(0, 5_000), Some((3_977, 4_026)));
-        assert_eq!(rpc_discovery_range(101, 5_000), Some((101, 150)));
-        assert_eq!(rpc_discovery_range(5_001, 5_000), None);
+    fn bounds_locate_scans_and_escalates_scan_depth() {
+        assert_eq!(locate_scan_range(10_000, 5_000), Some((4_999, 9_998)));
+        assert_eq!(locate_scan_range(100, 5_000), Some((0, 98)));
+        assert_eq!(locate_scan_range(1, 5_000), None);
+        assert_eq!(next_locate_scan_blocks(5_000), 10_000);
+        assert_eq!(next_locate_scan_blocks(400_000), 500_000);
+        assert_eq!(next_locate_scan_blocks(500_000), 500_000);
         assert_eq!(
             discovery_rpc_url(builtin_network(1).unwrap()),
             ETHEREUM_DISCOVERY_RPC_URL
@@ -5137,6 +5640,44 @@ mod tests {
             discovery_rpc_url(builtin_network(8453).unwrap()),
             "https://mainnet.base.org"
         );
+    }
+
+    #[test]
+    fn balance_changes_and_reconciliation_gaps_trigger_locate() {
+        assert!(!balance_locate_trigger("0", Some("0"), "0", false));
+        assert!(balance_locate_trigger("10", Some("0"), "0", false));
+        assert!(balance_locate_trigger("10", Some("10"), "0", false));
+        assert!(!balance_locate_trigger("10", Some("10"), "10", false));
+        assert!(balance_locate_trigger("20", Some("10"), "10", false));
+        assert!(balance_locate_trigger("0", Some("0"), "0", true));
+        assert!(balance_locate_trigger("5", None, "0", false));
+        assert!(!balance_locate_trigger("0", None, "0", false));
+    }
+
+    #[test]
+    fn locate_retries_back_off_after_repeated_errors() {
+        let now = Utc::now();
+        assert!(locate_retry_ready(0, None, now));
+        assert!(locate_retry_ready(
+            2,
+            Some(&(now - chrono::Duration::seconds(1)).to_rfc3339()),
+            now
+        ));
+        assert!(!locate_retry_ready(
+            3,
+            Some(&(now - chrono::Duration::seconds(5)).to_rfc3339()),
+            now
+        ));
+        assert!(locate_retry_ready(
+            3,
+            Some(&(now - chrono::Duration::seconds(120)).to_rfc3339()),
+            now
+        ));
+        assert!(locate_retry_ready(
+            9,
+            Some(&(now - chrono::Duration::seconds(3_600)).to_rfc3339()),
+            now
+        ));
     }
 
     #[tokio::test]
@@ -6597,6 +7138,12 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO wallet_asset_snapshots(wallet_address_id,chain_id,asset_id,raw_amount,checked_at,updated_at) SELECT ?1,1,id,'0',?2,?2 FROM supported_assets LIMIT 1")
+            .bind(&wallet_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
 
         migrate(&db).await.unwrap();
 
@@ -6621,6 +7168,16 @@ mod tests {
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM deposit_discovery_cursors WHERE wallet_address_id=?1"
+            )
+            .bind(&wallet_id)
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM wallet_asset_snapshots WHERE wallet_address_id=?1"
             )
             .bind(&wallet_id)
             .fetch_one(&db)

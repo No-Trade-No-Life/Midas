@@ -14,7 +14,7 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 ## Payment model
 
 - The ledger's sole unit is integer USD nanodollars. Built-in USDC and USDT maps cover Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon; token amounts are converted exactly to USD nanodollars, including the 18-decimal BSC assets.
-- The worker polls one address-chain pair per second, using bounded RPC `Transfer`-log queries and a durable cursor to recover from downtime without skipping scanned ranges. It never credits a discovery log directly: every candidate is verified against the configured chain RPC receipt and ERC-20 `Transfer` log. The customer claim endpoint accepts only a chain and TxID; it derives asset and amount from the receipt, and a TxID can be credited only once.
+- The worker reads every deposit address's USDC/USDT balances every 30 seconds and reconciles them against credited, not-yet-swept deposits; submitted sweeps are finalized from their token-transfer receipts. A changed balance or a reconciliation gap triggers a bounded recent `Transfer`-log scan (5,000 blocks initially, escalating only while the gap stays unresolved) that resolves the transaction hash. It never credits a discovery log directly: every candidate is verified against the configured chain RPC receipt and ERC-20 `Transfer` log. The customer claim endpoint accepts only a chain and TxID; it derives asset and amount from the receipt, and a TxID can be credited only once.
 - A confirmed deposit credits the USD ledger, then queues a two-step collection: the single custody wallet funds native gas and the user's stored deposit key signs the ERC-20 transfer back to that same custody address.
 - Transfers are paired, immutable USD ledger entries and use Linkit's username picker. Withdrawals select a chain and USDC/USDT, reserve the available USD balance, accept a direct same-chain EVM destination, and broadcast only when the custody signer exists. The user can then save that destination from its history.
 - Broadcast withdrawal destinations are grouped by exact address, network, and token. The user may save a note for each target and select it again in the withdrawal drawer.
@@ -40,5 +40,5 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 
 - No other fiat valuation or token decimals.
 - No anonymous balance or payment access.
-- No unbounded block-range/event scanning; each RPC query is capped to a narrow block range and cursor progress is persisted only after processing succeeds.
+- No unbounded block-range/event scanning; Transfer-log queries run only for a detected balance change or reconciliation gap and stay capped to a bounded recent block range.
 - No arbitrary cross-origin API credentials; integrations use an Auth Mini bearer token for the applicable user.
