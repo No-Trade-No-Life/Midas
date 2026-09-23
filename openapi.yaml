@@ -343,8 +343,8 @@ paths:
       responses: { '200': { description: Saved configuration } }
   /admin/deposit-discovery:
     get:
-      summary: Root-only RPC discovery status
-      responses: { '200': { description: Discovery worker status, content: { application/json: { schema: { $ref: '#/components/schemas/DepositDiscoveryStatus' } } } } }
+      summary: Root-only balance-snapshot deposit discovery status
+      responses: { '200': { description: Per-chain balance check freshness, reconciliation gaps, pending transaction-hash locates, and the problems that need attention, content: { application/json: { schema: { $ref: '#/components/schemas/DepositDiscoveryStatus' } } } } }
   /admin/custody-balances:
     get:
       summary: Root-only live custody wallet balances for native assets, USDC, and USDT on every built-in EVM network
@@ -747,12 +747,41 @@ components:
         custody_wallet_private_key: { type: string, writeOnly: true, description: "One EVM key funds gas, collects deposits, and signs withdrawals. Its address is derived server-side." }
     DepositDiscoveryStatus:
       type: object
-      required: [polling_interval_seconds]
+      required: [polling_interval_seconds, initial_scan_blocks, chains, problems]
       properties:
         polling_interval_seconds: { type: integer, minimum: 1 }
-        last_attempt_at: { type: [string, 'null'], format: date-time }
-        last_success_at: { type: [string, 'null'], format: date-time }
-        last_error: { type: [string, 'null'] }
+        initial_scan_blocks: { type: integer, minimum: 1 }
+        heartbeat_at: { type: [string, 'null'], format: date-time }
+        chains:
+          type: array
+          items:
+            type: object
+            required: [chain_id, name, enabled, wallet_count, reconciliation_gap_count, pending_locate_count, status]
+            properties:
+              chain_id: { type: integer }
+              name: { type: string }
+              enabled: { type: boolean }
+              wallet_count: { type: integer }
+              checked_at: { type: [string, 'null'], format: date-time }
+              reconciliation_gap_count: { type: integer }
+              pending_locate_count: { type: integer }
+              last_error: { type: [string, 'null'] }
+              status: { type: string, enum: [ok, attention, waiting, stale, no_wallets] }
+        problems:
+          type: array
+          items:
+            type: object
+            required: [address, user_id, chain_id, network_name, symbol, amount, kind, since]
+            properties:
+              address: { type: string }
+              user_id: { type: string, format: uuid }
+              chain_id: { type: integer }
+              network_name: { type: string }
+              symbol: { type: string, enum: [USDC, USDT] }
+              amount: { type: string }
+              kind: { type: string, enum: [reconciliation_gap, locate_pending] }
+              last_error: { type: [string, 'null'] }
+              since: { type: string, format: date-time }
     WithdrawalAvailability:
       type: object
       required: [asset_id, chain_id, network_name, asset_symbol, available_amount, available_usd_nanos, status, gas_sufficient, observed_at, reason]

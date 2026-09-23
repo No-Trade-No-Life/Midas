@@ -7,7 +7,7 @@
 - Rust/Axum API with SQLite **WAL** persistence.
 - Exact USD nanodollar ledger (`amount_usd_nanos` / `balance_delta_usd_nanos`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD nanodollars.
 - One persisted dedicated EVM-compatible deposit key/address per human user, automatically created after initialization; private material is never returned from an API.
-- Automatic receipt-driven deposits: Midas scans a bounded RPC `Transfer`-log range for one deposit-address/network pair per second and persists its cursor. It verifies every candidate's ERC-20 receipt through the chain RPC, credits USD, and submits the gas-funding and source-wallet collection sequence. Customers can also submit a network and TxID to verify and claim a missed deposit; the token and amount are always derived from the receipt.
+- Balance-driven deposit discovery: every 30 seconds Midas reads each human deposit address's USDC/USDT balance on every enabled chain and reconciles it against the credited, not-yet-swept ledger. A balance change or reconciliation gap triggers a bounded recent `Transfer`-log scan (5,000 blocks initially, escalating only while a gap stays unresolved) that resolves the transaction hash; every candidate is verified from its ERC-20 receipt through the chain RPC before crediting, and submitted sweeps are finalized from their receipts so reconciliation stays exact. Customers can also submit a network and TxID to verify and claim a missed deposit; the token and amount are always derived from the receipt.
 - Atomic internal transfers that automatically provision a new human recipient's Midas account and dedicated wallet, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization.
 - One-time `app_meta.root_user_id` bootstrap plus a root-only, input-only custody-wallet private key. Its address is derived server-side and the same wallet funds gas, collects deposits, and signs withdrawals.
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary with automatic redirect to sign-in; Midas has no unauthenticated home page.
@@ -36,7 +36,7 @@ Axum API
 
 Midas records **USD only** in integer nanodollars. Future USDC/USDT chain metadata is retained alongside ledger entries, but no token amount is treated as the system-of-record balance.
 
-Existing SQLite databases migrate on the first startup that carries this version. The USD-unit migration atomically renames every persisted `*_usd_micros` column, multiplies its historical values by 1,000, verifies that no value can overflow `i64`, and records the `nanodollars` unit marker so it cannot run twice. The startup migration also removes any legacy fund-user deposit private keys and discovery cursors.
+Existing SQLite databases migrate on the first startup that carries this version. The USD-unit migration atomically renames every persisted `*_usd_micros` column, multiplies its historical values by 1,000, verifies that no value can overflow `i64`, and records the `nanodollars` unit marker so it cannot run twice. The startup migration also removes any legacy fund-user deposit private keys, discovery cursors, and balance snapshots.
 
 | Table | Purpose |
 | --- | --- |
@@ -47,7 +47,7 @@ Existing SQLite databases migrate on the first startup that carries this version
 | `supported_assets` | Seeded USDC / USDT contract and decimal metadata |
 | `wallet_addresses` | One human-user EVM-compatible deposit address (legacy chain field is an internal sentinel) |
 | `wallet_private_keys` | Dedicated human-user EVM deposit private keys; readable only by the service account |
-| `deposit_discovery_cursors` | Durable bounded-RPC-scan cursor per human deposit address and chain |
+| `wallet_asset_snapshots` | Latest USDC/USDT balance snapshot, locate state, and scan escalation per human deposit address, chain, and asset |
 | `ledger_entries` | Immutable USD balance deltas and payment history |
 | `payment_operations` | Per-user idempotency keys for payment writes |
 | `deposits`, `deposit_sweeps` | Confirmed deposits and the two-step collection state |
