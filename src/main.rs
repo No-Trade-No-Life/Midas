@@ -49,6 +49,15 @@ abigen!(
     ]"#,
 );
 
+// Multicall3 (https://www.multicall3.com) is deployed at the same address on
+// all six built-in networks. Midas reads every deposit-address token balance
+// per chain in one aggregate3 call so public RPCs never see balance-read
+// bursts.
+abigen!(
+    Multicall3,
+    r#"[{"inputs":[{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bool","name":"allowFailure","type":"bool"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"tuple[]","name":"calls","type":"tuple[]"}],"name":"aggregate3","outputs":[{"components":[{"internalType":"bool","name":"success","type":"bool"},{"internalType":"bytes","name":"returnData","type":"bytes"}],"internalType":"tuple[]","name":"returnData","type":"tuple[]"}],"stateMutability":"payable","type":"function"}]"#,
+);
+
 const AUTH_MINI_BASE_URL: &str = "https://auth.ntnl.io";
 const AUTH_MINI_AUDIENCE: &str = "midas.ntnl.io";
 const ROOT_USER_ID_KEY: &str = "root_user_id";
@@ -72,6 +81,7 @@ const LOCATE_INITIAL_SCAN_BLOCKS: i64 = 5_000;
 const LOCATE_MAX_SCAN_BLOCKS: i64 = 500_000;
 const DEPOSIT_DISCOVERY_STALE_SECONDS: i64 = 300;
 const DEPOSIT_DISCOVERY_RETRY_MAX_SECONDS: i64 = 1_800;
+const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 const ETHEREUM_DISCOVERY_RPC_URL: &str = "https://rpc.mevblocker.io";
 const BSC_DISCOVERY_RPC_URL: &str = "https://bsc-rpc.publicnode.com";
 const USD_LEDGER_COLUMNS: [(&str, &str, &str); 5] = [
@@ -1539,14 +1549,15 @@ async fn refresh_chain_deposit_balances(state: &AppState, chain_id: i64) -> Resu
         .collect();
     let unswept = load_unswept_deposit_amounts(&state.db, Some(chain_id)).await?;
     let snapshots = load_balance_snapshots(&state.db, chain_id).await?;
+    let balances = read_chain_token_balances(&provider, &wallets, &assets).await?;
     let mut read_error: Option<String> = None;
-    for wallet in &wallets {
-        for asset in &assets {
+    for (wallet_index, wallet) in wallets.iter().enumerate() {
+        for (asset_index, asset) in assets.iter().enumerate() {
             let key = (wallet.id.clone(), asset.id.to_string());
-            let raw = match read_token_balance(&provider, *asset, &wallet.address).await {
-                Ok(raw) => raw,
-                Err(error) => {
-                    read_error.get_or_insert(error.message);
+            let raw = match &balances[wallet_index * assets.len() + asset_index] {
+                Ok(raw) => *raw,
+                Err(message) => {
+                    read_error.get_or_insert_with(|| message.clone());
                     continue;
                 }
             };
@@ -1853,15 +1864,52 @@ async fn load_unswept_deposit_amount(
         .fold(U256::zero(), |total, amount| total.saturating_add(amount)))
 }
 
-async fn read_token_balance(
+fn balance_of_calldata(address: Address) -> Bytes {
+    let mut data = Vec::with_capacity(36);
+    data.extend_from_slice(&keccak256("balanceOf(address)")[..4]);
+    data.extend_from_slice(&[0_u8; 12]);
+    data.extend_from_slice(address.as_bytes());
+    Bytes::from(data)
+}
+
+/// Reads every (wallet, asset) balance for one chain in a single Multicall3
+/// call. Individual call failures come back as per-entry errors so one broken
+/// token never fails the whole batch.
+async fn read_chain_token_balances(
     provider: &Provider<Http>,
-    asset: BuiltinAsset,
-    wallet_address: &str,
-) -> Result<U256, ApiError> {
-    let contract = parse_address(asset.contract_address, "configured token contract")?;
-    let address = parse_address(wallet_address, "stored deposit address")?;
-    let token = Erc20::new(contract, Arc::new(provider.clone()));
-    token.balance_of(address).call().await.map_err(chain_error)
+    wallets: &[DepositWallet],
+    assets: &[BuiltinAsset],
+) -> Result<Vec<Result<U256, String>>, ApiError> {
+    let multicall = Multicall3::new(
+        parse_address(MULTICALL3_ADDRESS, "multicall3 contract")?,
+        Arc::new(provider.clone()),
+    );
+    let mut calls = Vec::with_capacity(wallets.len() * assets.len());
+    for wallet in wallets {
+        let address = parse_address(&wallet.address, "stored deposit address")?;
+        for asset in assets {
+            calls.push((
+                parse_address(asset.contract_address, "configured token contract")?,
+                true,
+                balance_of_calldata(address),
+            ));
+        }
+    }
+    let results = multicall
+        .aggregate_3(calls)
+        .call()
+        .await
+        .map_err(chain_error)?;
+    Ok(results
+        .into_iter()
+        .map(|(success, data)| {
+            if success && data.0.len() >= 32 {
+                Ok(U256::from_big_endian(&data.0[..32]))
+            } else {
+                Err("token balance call failed".to_string())
+            }
+        })
+        .collect())
 }
 
 /// Resolves the transaction hashes behind a balance change by scanning a
@@ -5640,6 +5688,16 @@ mod tests {
             discovery_rpc_url(builtin_network(8453).unwrap()),
             "https://mainnet.base.org"
         );
+    }
+
+    #[test]
+    fn encodes_erc20_balance_of_calldata() {
+        let address = Address::from_low_u64_be(1);
+        let data = balance_of_calldata(address);
+        assert_eq!(data.0.len(), 36);
+        assert_eq!(&data.0[..4], &[0x70, 0xa0, 0x82, 0x31]);
+        assert_eq!(&data.0[4..16], &[0_u8; 12]);
+        assert_eq!(&data.0[16..], address.as_bytes());
     }
 
     #[test]
