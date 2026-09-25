@@ -3,7 +3,7 @@ import { createPortal } from "react-dom"
 import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider, type UseQueryResult, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { AuthMiniProvider, useAuthMini } from "auth-mini-react-components"
-import { LinkitMyInfo, LinkitProvider, LinkitUserInfo, LinkitUserPicker } from "linkit-react-components"
+import { LinkitMyInfo, LinkitProvider, LinkitUserInfo, LinkitUserPicker, useLinkit } from "linkit-react-components"
 import { ThemeProvider } from "next-themes"
 import { QRCodeSVG } from "qrcode.react"
 import { HashRouter, Link, Route, Routes, useLocation, useSearchParams } from "react-router-dom"
@@ -16,7 +16,6 @@ import {
   ChevronRightIcon,
   ClipboardCopyIcon,
   ExternalLinkIcon,
-  Globe2Icon,
   HistoryIcon,
   LandmarkIcon,
   LoaderCircleIcon,
@@ -38,7 +37,6 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Drawer, DrawerContent, DrawerDescription, DrawerFooter, DrawerHeader, DrawerTitle } from "@/components/ui/drawer"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
@@ -178,14 +176,13 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
 
   useEffect(() => { window.localStorage.setItem("midas-language", language) }, [language])
 
-  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><div className={cn("min-h-dvh bg-background", auth.isAuthenticated && "lg:grid", auth.isAuthenticated && (navigationCollapsed ? "lg:grid-cols-[3rem_minmax(0,1fr)]" : "lg:grid-cols-[16rem_minmax(0,1fr)]"))}>
+  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><LinkitLanguageSync setLanguage={setLanguage} /><div className={cn("min-h-dvh bg-background", auth.isAuthenticated && "lg:grid", auth.isAuthenticated && (navigationCollapsed ? "lg:grid-cols-[3rem_minmax(0,1fr)]" : "lg:grid-cols-[16rem_minmax(0,1fr)]"))}>
     {auth.isAuthenticated && <DesktopNavigation collapsed={navigationCollapsed} root={root} t={t} />}
     <div className="min-w-0">
     <header className="sticky top-0 border-b bg-background">
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} className="lg:hidden" size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button>{auth.isAuthenticated && <Button aria-label={navigationCollapsed ? t("menu") : t("appName")} className="hidden lg:inline-flex" size="icon" variant="ghost" onClick={() => setNavigationCollapsed(value => !value)}>{navigationCollapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}</Button>}<Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><LandmarkIcon aria-hidden="true" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
         <div className="flex shrink-0 items-center gap-1">
-          <LanguageMenu language={language} setLanguage={setLanguage} t={t} />
           <LinkitMyInfo />
         </div>
       </div>
@@ -684,8 +681,22 @@ function AdminRoute({ root, t, children }: { root: boolean; t: Translate; childr
   return <section className="flex flex-col gap-6"><div><p className="text-sm text-muted-foreground">{t("administration")}</p><h1 className="text-2xl font-semibold tracking-tight">{t("rootOnly")}</h1></div><Alert><ShieldCheckIcon /><AlertTitle>{t("rootOnly")}</AlertTitle><AlertDescription>{t("security")}</AlertDescription></Alert></section>
 }
 
-function LanguageMenu({ language, setLanguage, t }: { language: Language; setLanguage: (language: Language) => void; t: Translate }) {
-  return <DropdownMenu><DropdownMenuTrigger render={<Button aria-label={t("language")} size="icon" variant="ghost" />}><Globe2Icon /></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuGroup><DropdownMenuItem onClick={() => setLanguage("en")}><Globe2Icon />{t("english")}{language === "en" ? <Badge variant="secondary">EN</Badge> : null}</DropdownMenuItem><DropdownMenuItem onClick={() => setLanguage("zh")}><Globe2Icon />{t("chinese")}{language === "zh" ? <Badge variant="secondary">中文</Badge> : null}</DropdownMenuItem></DropdownMenuGroup></DropdownMenuContent></DropdownMenu>
+function LinkitLanguageSync({ setLanguage }: { setLanguage: (language: Language) => void }) {
+  const { languages } = useLinkit()
+  useEffect(() => {
+    const next = negotiateLanguage(languages)
+    if (next) setLanguage(next)
+  }, [languages, setLanguage])
+  return null
+}
+
+function negotiateLanguage(languages: readonly string[]): Language | undefined {
+  for (const language of languages) {
+    const base = language.toLowerCase().split("-")[0]
+    if (base === "zh") return "zh"
+    if (base === "en") return "en"
+  }
+  return undefined
 }
 
 function SweepStatusBadge({ t, status }: { t: Translate; status: string }) { const label = status === "queued" ? t("collectionQueued") : status === "awaiting_configuration" ? t("collectionAwaitingConfiguration") : status === "submitted" ? t("collectionSubmitted") : status === "failed" ? t("collectionFailed") : status === "swept" ? t("collectionSwept") : status.replace("_", " "); return <Badge variant={status === "failed" ? "destructive" : status === "swept" ? "secondary" : "outline"}>{label}</Badge> }
