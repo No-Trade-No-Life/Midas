@@ -6,6 +6,15 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(8);
 // ASSUMPTION: 200k gas and twice the quoted price cover built-in token transfers.
 // Signing enforces this budget; price spikes leave the existing reservation pending.
 const TRANSFER_GAS_BUDGET: u64 = 200_000;
+// Pre-migration withdrawals carry no recorded gas reservation. Budget each
+// with a fixed conservative amount instead of treating the chain's gas as
+// unknown and blocking collection.
+// ASSUMPTION: 0.001 native covers a token transfer's gas on every built-in
+// chain at typical gas prices. If it is too small, signing stays pending
+// ("retry later") while sweeps keep the fallback reserved; if it is too
+// large, sweeps merely wait until the withdrawal settles. Both directions
+// stay safe and recoverable.
+pub(crate) const LEGACY_GAS_RESERVATION_WEI: u64 = 1_000_000_000_000_000;
 
 #[derive(Clone)]
 pub(crate) struct Observation {
@@ -139,32 +148,24 @@ async fn observe_rpc(db: &SqlitePool, asset: BuiltinAsset) -> Result<Observation
     })
 }
 
-async fn reservations(
-    db: &SqlitePool,
-    asset: BuiltinAsset,
-) -> Result<(U256, U256, bool), ApiError> {
+async fn reservations(db: &SqlitePool, asset: BuiltinAsset) -> Result<(U256, U256), ApiError> {
     let rows = sqlx::query("SELECT w.asset_id,w.amount_usd_nanos,w.gas_reservation_wei FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN ledger_entries e ON e.id=w.ledger_entry_id WHERE a.chain_id=?1 AND (w.status IN ('awaiting_signer','submitted') OR e.status='pending')")
         .bind(asset.chain_id).fetch_all(db).await.map_err(db_error)?;
     let mut token = U256::zero();
     let mut gas = U256::zero();
-    let mut unknown_gas = false;
     for row in rows {
         if row.get::<String, _>(0) == asset.id {
             token =
                 token.saturating_add(usd_nanos_to_token_units(row.get(1), asset.token_decimals)?);
         }
-        match row.get::<Option<String>, _>(2) {
-            Some(value) => {
-                gas = gas.saturating_add(
-                    U256::from_dec_str(&value)
-                        .map_err(|_| ApiError::conflict("liquidity_unavailable"))?,
-                )
-            }
-            // Existing pre-migration requests drain normally, but cannot be budgeted safely.
-            None => unknown_gas = true,
-        }
+        let reservation = match row.get::<Option<String>, _>(2) {
+            Some(value) => U256::from_dec_str(&value)
+                .map_err(|_| ApiError::conflict("liquidity_unavailable"))?,
+            None => U256::from(LEGACY_GAS_RESERVATION_WEI),
+        };
+        gas = gas.saturating_add(reservation);
     }
-    Ok((token, gas, unknown_gas))
+    Ok((token, gas))
 }
 
 async fn availability(
@@ -195,8 +196,8 @@ async fn availability(
         }
     };
     result.observed_at = Some(observation.observed_at.clone());
-    let (token, gas, unknown) = reservations(db, asset).await?;
-    let sufficient = !unknown && observation.native.saturating_sub(gas) >= observation.fee;
+    let (token, gas) = reservations(db, asset).await?;
+    let sufficient = observation.native.saturating_sub(gas) >= observation.fee;
     result.gas_sufficient = Some(sufficient);
     let units = observation.token.saturating_sub(token);
     // Cap at the ledger's i64 range and round DOWN to representable nanodollars.
@@ -211,9 +212,7 @@ async fn availability(
         1
     };
     let nanos = nanos.min(U256::from(i64::MAX as u64)).as_u64() as i64 / quantum * quantum;
-    result.reason = if unknown {
-        Some("pending_gas_unknown")
-    } else if !sufficient {
+    result.reason = if !sufficient {
         Some("insufficient_gas")
     } else if nanos == 0 {
         Some("insufficient_liquidity")
@@ -304,8 +303,8 @@ pub(crate) async fn protect_sweep_gas(
     native: U256,
     cost: U256,
 ) -> Result<(), ApiError> {
-    let (_, gas, unknown) = reservations(db, builtin_asset_for_network(chain_id, "USDC")).await?;
-    if unknown || native.saturating_sub(gas) < cost {
+    let (_, gas) = reservations(db, builtin_asset_for_network(chain_id, "USDC")).await?;
+    if native.saturating_sub(gas) < cost {
         return Err(ApiError::conflict("insufficient unreserved custody gas"));
     }
     Ok(())
@@ -537,10 +536,9 @@ mod tests {
         let _execution = state.withdrawal_lock.lock().await;
         sqlx::query("UPDATE withdrawals SET status='submitted',signed_transaction='0x01',transaction_hash='hash' WHERE id=?1").bind(&withdrawal.id).execute(&state.db).await.unwrap();
         let asset = builtin_asset("1-USDC").unwrap();
-        let (token, gas, unknown) = reservations(&state.db, asset).await.unwrap();
+        let (token, gas) = reservations(&state.db, asset).await.unwrap();
         assert_eq!(token, U256::from(1_000_000));
         assert_eq!(gas, U256::from(400_000));
-        assert!(!unknown);
         let usdt = builtin_asset("1-USDT").unwrap();
         let response = availability(&state.db, usdt, observe(&state.db, usdt).await)
             .await
@@ -566,11 +564,55 @@ mod tests {
         assert!(state.liquidity_cache.lock().await.entries.is_empty());
         assert_eq!(
             reservations(&state.db, asset).await.unwrap(),
-            (U256::zero(), U256::zero(), false)
+            (U256::zero(), U256::zero())
         );
         assert_eq!(
             available_balance(&state.db, &user).await.unwrap(),
             100_000_000_000
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_withdrawal_without_reservation_is_budgeted_conservatively() {
+        let (state, user, _, server) = fixture(2_000_000, 2_000_000_000_000_000).await;
+        let ledger = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'withdrawal','pending','1-USDC',1000000,-1000000,'now')")
+            .bind(&ledger)
+            .bind(&user)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_nanos,status,created_at,updated_at) VALUES('legacy-withdrawal',?1,'1-USDC',?2,'0x0000000000000000000000000000000000000001',1000000,'awaiting_signer','now','now')")
+            .bind(&user)
+            .bind(&ledger)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let asset = builtin_asset("1-USDC").unwrap();
+        let (_, gas) = reservations(&state.db, asset).await.unwrap();
+        assert_eq!(gas, U256::from(LEGACY_GAS_RESERVATION_WEI));
+        let available = availability(&state.db, asset, observe(&state.db, asset).await)
+            .await
+            .unwrap();
+        assert_eq!(available.gas_sufficient, Some(true));
+        protect_sweep_gas(
+            &state.db,
+            1,
+            U256::from(LEGACY_GAS_RESERVATION_WEI) + U256::from(400_000),
+            U256::from(400_000),
+        )
+        .await
+        .unwrap();
+        assert!(
+            protect_sweep_gas(
+                &state.db,
+                1,
+                U256::from(LEGACY_GAS_RESERVATION_WEI) + U256::from(399_999),
+                U256::from(400_000)
+            )
+            .await
+            .is_err()
         );
         server.abort();
     }

@@ -4274,6 +4274,19 @@ async fn wait_for_transaction_receipt(
     .map_err(|_| ApiError::conflict("the withdrawal transaction confirmation timed out"))?
 }
 
+// ASSUMPTION: a withdrawal without a stored reservation is a pre-migration
+// record; bound it with the same conservative fallback the sweep guard
+// reserves for it. If the fallback cannot cover the current gas price, the
+// withdrawal stays pending ("retry later") and no funds are moved.
+fn withdrawal_gas_budget(reservation: Option<&str>) -> Result<U256, ApiError> {
+    match reservation {
+        Some(value) => {
+            U256::from_dec_str(value).map_err(|_| ApiError::conflict("invalid gas reservation"))
+        }
+        None => Ok(U256::from(liquidity::LEGACY_GAS_RESERVATION_WEI)),
+    }
+}
+
 async fn sign_withdrawal(
     db: &SqlitePool,
     withdrawal_id: &str,
@@ -4333,14 +4346,11 @@ async fn sign_withdrawal(
             .fetch_one(db)
             .await
             .map_err(db_error)?;
-    if let Some(reservation) = reservation {
-        let budget = U256::from_dec_str(&reservation)
-            .map_err(|_| ApiError::conflict("invalid gas reservation"))?;
-        if gas.checked_mul(gas_price).is_none_or(|cost| cost > budget) {
-            return Err(ApiError::conflict(
-                "gas price exceeds reserved budget; retry later",
-            ));
-        }
+    let budget = withdrawal_gas_budget(reservation.as_deref())?;
+    if gas.checked_mul(gas_price).is_none_or(|cost| cost > budget) {
+        return Err(ApiError::conflict(
+            "gas price exceeds reserved budget; retry later",
+        ));
     }
     transaction.set_gas(gas);
     let signature = wallet
@@ -5896,6 +5906,21 @@ mod tests {
             None
         ));
         assert!(!withdrawal_is_retryable("completed", None, None));
+    }
+
+    #[test]
+    fn legacy_withdrawal_budget_uses_conservative_fallback() {
+        assert_eq!(
+            withdrawal_gas_budget(None).unwrap(),
+            U256::from(liquidity::LEGACY_GAS_RESERVATION_WEI)
+        );
+        let fallback = liquidity::LEGACY_GAS_RESERVATION_WEI.to_string();
+        assert_eq!(
+            withdrawal_gas_budget(Some(&fallback)).unwrap(),
+            U256::from(liquidity::LEGACY_GAS_RESERVATION_WEI)
+        );
+        assert_eq!(withdrawal_gas_budget(Some("42")).unwrap(), U256::from(42));
+        assert!(withdrawal_gas_budget(Some("not-a-number")).is_err());
     }
 
     #[tokio::test]
