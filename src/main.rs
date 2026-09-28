@@ -83,7 +83,9 @@ const DEPOSIT_DISCOVERY_STALE_SECONDS: i64 = 300;
 const DEPOSIT_DISCOVERY_RETRY_MAX_SECONDS: i64 = 1_800;
 const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 const ETHEREUM_DISCOVERY_RPC_URL: &str = "https://rpc.mevblocker.io";
-const BSC_DISCOVERY_RPC_URL: &str = "https://bsc-rpc.publicnode.com";
+const BSC_DISCOVERY_RPC_URL: &str =
+    "https://bsc-mainnet.nodereal.io/v1/64a9df0874fb4a93b9d0a3849de012d3";
+const POLYGON_DISCOVERY_RPC_URL: &str = "https://polygon.drpc.org";
 const USD_LEDGER_COLUMNS: [(&str, &str, &str); 5] = [
     ("ledger_entries", "amount_usd_micros", "amount_usd_nanos"),
     (
@@ -2006,6 +2008,7 @@ fn discovery_rpc_url(network: BuiltinEvmNetwork) -> &'static str {
     match network.chain_id {
         1 => ETHEREUM_DISCOVERY_RPC_URL,
         56 => BSC_DISCOVERY_RPC_URL,
+        137 => POLYGON_DISCOVERY_RPC_URL,
         _ => network.rpc_url,
     }
 }
@@ -5693,6 +5696,10 @@ mod tests {
         assert_eq!(
             discovery_rpc_url(builtin_network(56).unwrap()),
             BSC_DISCOVERY_RPC_URL
+        );
+        assert_eq!(
+            discovery_rpc_url(builtin_network(137).unwrap()),
+            POLYGON_DISCOVERY_RPC_URL
         );
         assert_eq!(
             discovery_rpc_url(builtin_network(8453).unwrap()),
