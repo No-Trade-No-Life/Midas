@@ -1,0 +1,28 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+const dollarMark = 'M32 9 V55 M44 12 H28 A10 10 0 0 0 28 32 H36 A10 10 0 0 1 36 52 H20';
+const favicon = readFileSync(new URL('../public/midas-mark.svg', import.meta.url), 'utf8');
+const markComponent = readFileSync(new URL('../src/components/midas-mark.tsx', import.meta.url), 'utf8');
+const indexHtml = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+
+test('the favicon is a dollar mark with a light and dark palette', () => {
+  assert.ok(favicon.includes(dollarMark));
+  assert.match(favicon, /path \{ stroke: #000; \}/);
+  assert.match(favicon, /@media \(prefers-color-scheme: dark\) \{\s*path \{ stroke: #fff; \}/);
+});
+
+test('the header and sidebar render the dollar mark in the theme foreground color', () => {
+  assert.match(markComponent, /stroke="currentColor"/);
+  assert.match(markComponent, /aria-hidden="true"/);
+  assert.ok(markComponent.includes(dollarMark));
+  assert.match(main, /<MidasMark className="size-6 shrink-0" \/>/);
+  assert.match(main, /<MidasMark className="size-7 shrink-0" \/>/);
+  assert.ok(!main.includes('dark:invert'));
+});
+
+test('the favicon links the SVG mark', () => {
+  assert.match(indexHtml, /<link rel="icon" type="image\/svg\+xml" href="\/midas-mark\.svg"\/>/);
+});
