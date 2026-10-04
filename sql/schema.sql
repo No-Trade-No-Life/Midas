@@ -169,6 +169,17 @@ CREATE TABLE IF NOT EXISTS internal_transfers (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Every root balance adjustment pins its immutable ledger entry to the
+-- operator (root user) who posted it, so direct balance changes stay
+-- attributable during post-hoc audit.
+CREATE TABLE IF NOT EXISTS adjustments (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  operator_user_id TEXT NOT NULL REFERENCES users(id),
+  ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS address_book_entries (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
