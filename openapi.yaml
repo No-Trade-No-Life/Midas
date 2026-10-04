@@ -388,7 +388,7 @@ paths:
           content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/LedgerEntry' } } } }
   /admin/adjustments:
     post:
-      summary: Root-only direct USD balance adjustment for any Midas user or fund account; posts one immutable adjustment ledger entry
+      summary: Root-only direct USD balance adjustment for any Midas user or fund account; posts one immutable adjustment ledger entry and records the acting root operator for post-hoc audit
       requestBody:
         required: true
         content:
@@ -396,7 +396,7 @@ paths:
             schema: { $ref: '#/components/schemas/AdminAdjustmentInput' }
       responses:
         '200':
-          description: The posted adjustment entry. Positive amounts credited the balance; negative amounts debited it.
+          description: The posted adjustment entry, including the recorded operator. Positive amounts credited the balance; negative amounts debited it.
           content: { application/json: { schema: { $ref: '#/components/schemas/AdminLedgerEntry' } } }
   /admin/balances:
     get:
@@ -584,6 +584,7 @@ components:
           properties:
             user_id: { type: string, format: uuid }
             counterparty_user_id: { type: [string, 'null'], format: uuid }
+            operator_user_id: { type: [string, 'null'], format: uuid, description: Root operator who posted the adjustment; null for other entry kinds. }
     AdminLedgerPage:
       type: object
       required: [entries, total, limit, offset]

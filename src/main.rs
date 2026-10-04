@@ -578,6 +578,7 @@ struct AdminLedgerEntry {
     id: String,
     user_id: String,
     counterparty_user_id: Option<String>,
+    operator_user_id: Option<String>,
     kind: String,
     status: String,
     amount_usd_nanos: i64,
@@ -3807,15 +3808,18 @@ async fn create_admin_adjustment(
     headers: HeaderMap,
     Json(input): Json<AdminAdjustmentInput>,
 ) -> Result<Json<AdminLedgerEntry>, ApiError> {
-    require_root(&state, &headers).await?;
+    let operator = require_root(&state, &headers).await?;
     Uuid::parse_str(&input.user_id)
         .map_err(|_| ApiError::invalid("user_id must be a Midas UUID"))?;
     let _write = state.write_lock.lock().await;
-    Ok(Json(post_admin_adjustment(&state.db, &input).await?))
+    Ok(Json(
+        post_admin_adjustment(&state.db, &operator, &input).await?,
+    ))
 }
 
 async fn post_admin_adjustment(
     db: &SqlitePool,
+    operator_user_id: &str,
     input: &AdminAdjustmentInput,
 ) -> Result<AdminLedgerEntry, ApiError> {
     let delta = input.amount_usd_nanos;
@@ -3859,12 +3863,22 @@ async fn post_admin_adjustment(
         },
     )
     .await?;
+    let adjustment_id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO adjustments(id,user_id,operator_user_id,ledger_entry_id,created_at) VALUES(?1,?2,?3,?4,?5)")
+        .bind(&adjustment_id)
+        .bind(&input.user_id)
+        .bind(operator_user_id)
+        .bind(&entry_id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
     read_admin_ledger_entry(db, &entry_id).await
 }
 
 async fn read_admin_ledger_entry(db: &SqlitePool, id: &str) -> Result<AdminLedgerEntry, ApiError> {
-    sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE e.id=?1")
+    sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash),x.operator_user_id FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id LEFT JOIN adjustments x ON x.ledger_entry_id=e.id WHERE e.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
@@ -3883,6 +3897,7 @@ fn admin_ledger_entry(row: sqlx::sqlite::SqliteRow) -> AdminLedgerEntry {
         id: row.get(0),
         user_id: row.get(1),
         counterparty_user_id: row.get(2),
+        operator_user_id: row.get(15),
         kind: row.get(3),
         status: row.get(4),
         amount_usd_nanos: row.get(5),
@@ -3981,7 +3996,7 @@ async fn load_admin_ledger(
         .fetch_one(db)
         .await
         .map_err(db_error)?;
-    let rows = sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE (?1 IS NULL OR e.kind=?1) AND (?2 IS NULL OR e.status=?2) AND (?3 IS NULL OR e.user_id=?3) ORDER BY e.created_at DESC,e.id DESC LIMIT ?4 OFFSET ?5")
+    let rows = sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash),x.operator_user_id FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id LEFT JOIN adjustments x ON x.ledger_entry_id=e.id WHERE (?1 IS NULL OR e.kind=?1) AND (?2 IS NULL OR e.status=?2) AND (?3 IS NULL OR e.user_id=?3) ORDER BY e.created_at DESC,e.id DESC LIMIT ?4 OFFSET ?5")
         .bind(kind)
         .bind(status)
         .bind(user_id)
@@ -6639,6 +6654,7 @@ mod tests {
         migrate(&db).await.unwrap();
         let human = Uuid::new_v4().to_string();
         let fund = Uuid::new_v4().to_string();
+        let operator = Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO users(id) VALUES(?1)")
             .bind(&human)
             .execute(&db)
@@ -6656,9 +6672,15 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&operator)
+            .execute(&db)
+            .await
+            .unwrap();
 
         let credit = post_admin_adjustment(
             &db,
+            &operator,
             &AdminAdjustmentInput {
                 user_id: human.clone(),
                 amount_usd_nanos: 12_990_000_000,
@@ -6668,6 +6690,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(credit.user_id, human);
+        assert_eq!(credit.operator_user_id, Some(operator.clone()));
         assert_eq!(credit.kind, "adjustment");
         assert_eq!(credit.status, "posted");
         assert_eq!(credit.amount_usd_nanos, 12_990_000_000);
@@ -6681,6 +6704,7 @@ mod tests {
 
         let debit = post_admin_adjustment(
             &db,
+            &operator,
             &AdminAdjustmentInput {
                 user_id: fund.clone(),
                 amount_usd_nanos: -2_000_000,
@@ -6690,6 +6714,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(debit.user_id, fund);
+        assert_eq!(debit.operator_user_id, Some(operator.clone()));
         assert_eq!(debit.amount_usd_nanos, 2_000_000);
         assert_eq!(debit.balance_delta_usd_nanos, -2_000_000);
         assert_eq!(debit.note, None);
@@ -6703,6 +6728,22 @@ mod tests {
         assert_eq!(funds.len(), 1);
         assert_eq!(funds[0].available_usd_nanos, -2_000_000);
 
+        let adjustment_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adjustments")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(adjustment_count, 2);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT operator_user_id FROM adjustments WHERE ledger_entry_id=?1"
+            )
+            .bind(&credit.id)
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            operator
+        );
+
         let page = load_admin_ledger(
             &db,
             admin_ledger_filters(AdminLedgerQuery {
@@ -6714,11 +6755,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(page.total, 2);
-        assert!(
-            page.entries
-                .iter()
-                .all(|entry| entry.status == "posted" && entry.posted_at.is_some())
-        );
+        assert!(page.entries.iter().all(|entry| entry.status == "posted"
+            && entry.posted_at.is_some()
+            && entry.operator_user_id.as_deref() == Some(operator.as_str())));
 
         let _ = std::fs::remove_file(path);
     }
@@ -6738,6 +6777,7 @@ mod tests {
         for amount_usd_nanos in [0, i64::MIN] {
             let error = post_admin_adjustment(
                 &db,
+                &user_id,
                 &AdminAdjustmentInput {
                     user_id: user_id.clone(),
                     amount_usd_nanos,
@@ -6750,6 +6790,7 @@ mod tests {
         }
         let unknown = post_admin_adjustment(
             &db,
+            &user_id,
             &AdminAdjustmentInput {
                 user_id: Uuid::new_v4().to_string(),
                 amount_usd_nanos: 1_000,

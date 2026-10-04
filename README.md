@@ -54,6 +54,7 @@ Existing SQLite databases migrate on the first startup that carries this version
 | `address_book_entries` | Legacy per-user, per-chain approved withdrawal destinations |
 | `withdrawal_target_notes` | User notes for broadcast withdrawal address × network × token targets |
 | `internal_transfers`, `withdrawals` | Atomic internal transfers and direct-destination chain withdrawal state |
+| `adjustments` | Root balance adjustments pinned to their ledger entry and acting operator for post-hoc audit |
 | `payment_agreements` | Owner-created payment channels with only a one-way API-key hash and non-secret prefix |
 | `payment_agreement_bindings` | Explicit user authorization for automatic-payment channels |
 | `payment_agreement_charges`, `payment_agreement_payouts` | Agreement-scoped idempotent charges and ledger-only payouts with their paired ledger entries |
@@ -101,8 +102,9 @@ A root operator creates and rotates fund users through `POST /api/admin/fund-use
 and `POST /api/admin/fund-users/{id}/api-key`. The plaintext key is returned once.
 The root operator can also adjust any human or fund account's USD balance directly
 through `POST /api/admin/adjustments`. Each adjustment is one immutable
-`adjustment` ledger entry with an optional operator note, and it appears in the
-account's own history and in the global ledger.
+`adjustment` ledger entry that records the acting root operator in an audit row,
+plus an optional note; it appears in the account's own history and in the global
+ledger.
 With `X-Api-Key`, a fund user may call `GET /api/balances/me`, `GET /api/ledger/me`,
 `GET /api/internal-transfers/me/inbound/{sender_user_id}`, the batched
 `POST /api/internal-transfers/me/inbound/summary`, and `POST /api/transfers`.
