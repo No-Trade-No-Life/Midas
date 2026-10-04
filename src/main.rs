@@ -5357,6 +5357,7 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
         .execute(db)
         .await?;
     remove_fund_user_wallet_keys(db).await?;
+    rebuild_adjustments_without_operator_foreign_key(db).await?;
     if !table_has_column(db, "supported_assets", "token_decimals").await? {
         sqlx::query(
             "ALTER TABLE supported_assets ADD COLUMN token_decimals INTEGER NOT NULL DEFAULT 6",
@@ -5390,6 +5391,33 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     seed_builtin_evm(db).await?;
     migrate_legacy_custody_wallet(db).await?;
+    Ok(())
+}
+
+async fn rebuild_adjustments_without_operator_foreign_key(db: &SqlitePool) -> anyhow::Result<()> {
+    let foreign_keys = sqlx::query("PRAGMA foreign_key_list(adjustments)")
+        .fetch_all(db)
+        .await?;
+    if !foreign_keys
+        .iter()
+        .any(|row| row.get::<String, _>(3) == "operator_user_id")
+    {
+        return Ok(());
+    }
+    let mut tx = db.begin().await?;
+    sqlx::query("CREATE TABLE adjustments_rebuilt (id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),operator_user_id TEXT NOT NULL,ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO adjustments_rebuilt(id,user_id,operator_user_id,ledger_entry_id,created_at) SELECT id,user_id,operator_user_id,ledger_entry_id,created_at FROM adjustments")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DROP TABLE adjustments")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE adjustments_rebuilt RENAME TO adjustments")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -6672,12 +6700,6 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO users(id) VALUES(?1)")
-            .bind(&operator)
-            .execute(&db)
-            .await
-            .unwrap();
-
         let credit = post_admin_adjustment(
             &db,
             &operator,
@@ -6805,6 +6827,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(entries, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn migrate_rebuilds_adjustments_without_the_operator_foreign_key() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let target = Uuid::new_v4().to_string();
+        let operator = Uuid::new_v4().to_string();
+        let ledger_entry_id = Uuid::new_v4().to_string();
+        let adjustment_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("DROP TABLE adjustments")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE adjustments (id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),operator_user_id TEXT NOT NULL REFERENCES users(id),ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users(id) VALUES(?1),(?2)")
+            .bind(&target)
+            .bind(&operator)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment','posted',1000,1000,?3)")
+            .bind(&ledger_entry_id)
+            .bind(&target)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO adjustments(id,user_id,operator_user_id,ledger_entry_id,created_at) VALUES(?1,?2,?3,?4,?5)")
+            .bind(&adjustment_id)
+            .bind(&target)
+            .bind(&operator)
+            .bind(&ledger_entry_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        migrate(&db).await.unwrap();
+
+        let foreign_key_columns: Vec<String> = sqlx::query("PRAGMA foreign_key_list(adjustments)")
+            .fetch_all(&db)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<String, _>(3))
+            .collect();
+        assert_eq!(foreign_key_columns.len(), 2);
+        assert!(foreign_key_columns.contains(&"user_id".to_string()));
+        assert!(foreign_key_columns.contains(&"ledger_entry_id".to_string()));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT operator_user_id FROM adjustments WHERE id=?1")
+                .bind(&adjustment_id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            operator
+        );
+
+        let second_entry_id = Uuid::new_v4().to_string();
+        let missing_operator = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment','posted',1000,1000,?3)")
+            .bind(&second_entry_id)
+            .bind(&target)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO adjustments(id,user_id,operator_user_id,ledger_entry_id,created_at) VALUES(?1,?2,?3,?4,?5)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&target)
+            .bind(&missing_operator)
+            .bind(&second_entry_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
         let _ = std::fs::remove_file(path);
     }
 
