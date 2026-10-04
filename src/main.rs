@@ -908,7 +908,7 @@ async fn main() -> anyhow::Result<()> {
         withdrawal_lock: Arc::new(Mutex::new(())),
         liquidity_cache: Arc::new(Mutex::new(liquidity::Cache::default())),
     };
-    resume_submitted_withdrawals(state.clone());
+    resume_pending_withdrawals(state.clone());
     start_deposit_discovery(state.clone());
     let app = app(state);
     let addr = "127.0.0.1:8787"
@@ -4233,21 +4233,47 @@ fn spawn_withdrawal_submission(state: AppState, withdrawal_id: String) {
     });
 }
 
-fn resume_submitted_withdrawals(state: AppState) {
+// A withdrawal can wait in awaiting_signer behind a signing attempt that
+// failed transiently, and a submitted withdrawal can still need its receipt.
+// Re-queue every withdrawal that still owes chain work when the service
+// starts so such a failure cannot strand a customer request until an
+// operator retries it.
+fn resume_pending_withdrawals(state: AppState) {
     tokio::spawn(async move {
-        let ids: Result<Vec<String>, _> = sqlx::query_scalar(
-            "SELECT w.id FROM withdrawals w JOIN users u ON u.id=w.user_id AND u.kind='human' WHERE w.status='submitted' AND w.transaction_hash IS NOT NULL",
-        )
-        .fetch_all(&state.db)
-        .await;
-        let Ok(ids) = ids else {
-            eprintln!("failed to load submitted withdrawals for recovery");
-            return;
+        let ids = match load_resumable_withdrawals(&state.db).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                eprintln!(
+                    "failed to load pending withdrawals for recovery: {}",
+                    error.message
+                );
+                return;
+            }
         };
         for id in ids {
             spawn_withdrawal_submission(state.clone(), id);
         }
     });
+}
+
+async fn load_resumable_withdrawals(db: &SqlitePool) -> Result<Vec<String>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT w.id,w.status,w.transaction_hash,w.signed_transaction FROM withdrawals w JOIN users u ON u.id=w.user_id AND u.kind='human' WHERE w.status IN ('awaiting_signer','submitted')",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(db_error)?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            withdrawal_is_retryable(
+                &row.get::<String, _>(1),
+                row.get::<Option<String>, _>(2).as_deref(),
+                row.get::<Option<String>, _>(3).as_deref(),
+            )
+        })
+        .map(|row| row.get(0))
+        .collect())
 }
 
 async fn submit_withdrawal(state: &AppState, withdrawal_id: &str) -> Result<(), ApiError> {
@@ -6038,6 +6064,56 @@ mod tests {
             U256::from(40_000_000)
         );
         assert!(withdrawal_gas_fee(U256::MAX).is_err());
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_resumes_only_withdrawals_that_owe_chain_work() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let hash = format!("0x{}", "aa".repeat(32));
+        let fixtures = [
+            ("awaiting_signer", None, None),
+            ("submitted", Some(hash.as_str()), Some("0x01")),
+            ("submitted", None, None),
+            ("completed", Some(hash.as_str()), None),
+            ("failed", None, None),
+        ];
+        for (index, (status, transaction_hash, signed_transaction)) in
+            fixtures.into_iter().enumerate()
+        {
+            let withdrawal_id = format!("withdrawal-{index}");
+            let ledger_id = format!("ledger-{index}");
+            sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'withdrawal','pending','56-USDT',1000000,-1000000,?3)")
+                .bind(&ledger_id)
+                .bind(&user_id)
+                .bind(&now)
+                .execute(&db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_nanos,transaction_hash,signed_transaction,status,created_at,updated_at) VALUES(?1,?2,'56-USDT',?3,'0x0000000000000000000000000000000000000001',1000000,?4,?5,?6,?7,?7)")
+                .bind(&withdrawal_id)
+                .bind(&user_id)
+                .bind(&ledger_id)
+                .bind(transaction_hash)
+                .bind(signed_transaction)
+                .bind(status)
+                .bind(&now)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let mut resumable = load_resumable_withdrawals(&db).await.unwrap();
+        resumable.sort();
+        assert_eq!(resumable, vec!["withdrawal-0", "withdrawal-1"]);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
