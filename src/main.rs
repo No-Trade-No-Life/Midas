@@ -549,6 +549,13 @@ struct FundUserApiKey {
     api_key: String,
 }
 
+#[derive(Deserialize)]
+struct AdminAdjustmentInput {
+    user_id: String,
+    amount_usd_nanos: i64,
+    note: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 struct AdminLedgerQuery {
     kind: Option<String>,
@@ -566,7 +573,7 @@ struct AdminLedgerFilters {
     offset: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct AdminLedgerEntry {
     id: String,
     user_id: String,
@@ -999,6 +1006,7 @@ fn app(state: AppState) -> Router {
             post(rotate_fund_user_api_key),
         )
         .route("/admin/fund-users/:id/ledger", get(fund_user_ledger))
+        .route("/admin/adjustments", post(create_admin_adjustment))
         .route("/admin/balances", get(list_admin_balances))
         .route("/admin/ledger", get(list_admin_ledger))
         .route("/admin/deposits", get(list_admin_deposits))
@@ -3794,6 +3802,102 @@ async fn load_admin_balances(db: &SqlitePool) -> Result<AdminBalancesResponse, A
     })
 }
 
+async fn create_admin_adjustment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AdminAdjustmentInput>,
+) -> Result<Json<AdminLedgerEntry>, ApiError> {
+    require_root(&state, &headers).await?;
+    Uuid::parse_str(&input.user_id)
+        .map_err(|_| ApiError::invalid("user_id must be a Midas UUID"))?;
+    let _write = state.write_lock.lock().await;
+    Ok(Json(post_admin_adjustment(&state.db, &input).await?))
+}
+
+async fn post_admin_adjustment(
+    db: &SqlitePool,
+    input: &AdminAdjustmentInput,
+) -> Result<AdminLedgerEntry, ApiError> {
+    let delta = input.amount_usd_nanos;
+    let amount = delta
+        .checked_abs()
+        .filter(|amount| *amount > 0)
+        .ok_or_else(|| {
+            ApiError::invalid("adjustment amount must be a non-zero USD nanodollar amount")
+        })?;
+    let target: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE id=?1")
+        .bind(&input.user_id)
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?;
+    if target.is_none() {
+        return Err(ApiError::invalid("adjustment target user does not exist"));
+    }
+    let note = input
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|note| !note.is_empty());
+    let entry_id = Uuid::new_v4().to_string();
+    let reference = format!("adjustment:{entry_id}");
+    let now = Utc::now().to_rfc3339();
+    let mut tx = db.begin().await.map_err(db_error)?;
+    insert_ledger(
+        &mut tx,
+        LedgerInsert {
+            id: &entry_id,
+            user_id: &input.user_id,
+            kind: "adjustment",
+            status: "posted",
+            asset_id: None,
+            amount_usd_nanos: amount,
+            balance_delta_usd_nanos: delta,
+            counterparty_user_id: None,
+            external_reference: Some(&reference),
+            note,
+            now: &now,
+        },
+    )
+    .await?;
+    tx.commit().await.map_err(db_error)?;
+    read_admin_ledger_entry(db, &entry_id).await
+}
+
+async fn read_admin_ledger_entry(db: &SqlitePool, id: &str) -> Result<AdminLedgerEntry, ApiError> {
+    sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE e.id=?1")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?
+        .map(admin_ledger_entry)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "adjustment ledger entry was not created",
+            )
+        })
+}
+
+fn admin_ledger_entry(row: sqlx::sqlite::SqliteRow) -> AdminLedgerEntry {
+    AdminLedgerEntry {
+        id: row.get(0),
+        user_id: row.get(1),
+        counterparty_user_id: row.get(2),
+        kind: row.get(3),
+        status: row.get(4),
+        amount_usd_nanos: row.get(5),
+        balance_delta_usd_nanos: row.get(6),
+        created_at: row.get(7),
+        posted_at: row.get(8),
+        external_reference: row.get(9),
+        note: row.get(10),
+        asset_symbol: row.get(11),
+        chain_id: row.get(12),
+        network_name: row.get(13),
+        transaction_hash: row.get(14),
+    }
+}
+
 async fn list_admin_ledger(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3887,26 +3991,7 @@ async fn load_admin_ledger(
         .await
         .map_err(db_error)?;
     Ok(AdminLedgerPage {
-        entries: rows
-            .into_iter()
-            .map(|row| AdminLedgerEntry {
-                id: row.get(0),
-                user_id: row.get(1),
-                counterparty_user_id: row.get(2),
-                kind: row.get(3),
-                status: row.get(4),
-                amount_usd_nanos: row.get(5),
-                balance_delta_usd_nanos: row.get(6),
-                created_at: row.get(7),
-                posted_at: row.get(8),
-                external_reference: row.get(9),
-                note: row.get(10),
-                asset_symbol: row.get(11),
-                chain_id: row.get(12),
-                network_name: row.get(13),
-                transaction_hash: row.get(14),
-            })
-            .collect(),
+        entries: rows.into_iter().map(admin_ledger_entry).collect(),
         total,
         limit: filters.limit,
         offset: filters.offset,
@@ -6443,6 +6528,141 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(available_balance(&db, &user_id).await.unwrap(), 1_500_000);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn admin_adjustments_post_signed_immutable_entries_for_human_and_fund_accounts() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let human = Uuid::new_v4().to_string();
+        let fund = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&human)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO users(id,kind,name,status) VALUES(?1,'fund','Partner fund','active')",
+        )
+        .bind(&fund)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO fund_user_api_keys(user_id,api_key_hash,api_key_prefix) VALUES(?1,'test-hash','test-prefix')")
+            .bind(&fund)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let credit = post_admin_adjustment(
+            &db,
+            &AdminAdjustmentInput {
+                user_id: human.clone(),
+                amount_usd_nanos: 12_990_000_000,
+                note: Some("Manual settlement correction".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(credit.user_id, human);
+        assert_eq!(credit.kind, "adjustment");
+        assert_eq!(credit.status, "posted");
+        assert_eq!(credit.amount_usd_nanos, 12_990_000_000);
+        assert_eq!(credit.balance_delta_usd_nanos, 12_990_000_000);
+        assert_eq!(credit.note.as_deref(), Some("Manual settlement correction"));
+        assert_eq!(
+            credit.external_reference,
+            Some(format!("adjustment:{}", credit.id))
+        );
+        assert!(credit.posted_at.is_some());
+
+        let debit = post_admin_adjustment(
+            &db,
+            &AdminAdjustmentInput {
+                user_id: fund.clone(),
+                amount_usd_nanos: -2_000_000,
+                note: Some("   ".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(debit.user_id, fund);
+        assert_eq!(debit.amount_usd_nanos, 2_000_000);
+        assert_eq!(debit.balance_delta_usd_nanos, -2_000_000);
+        assert_eq!(debit.note, None);
+
+        assert_eq!(
+            available_balance(&db, &human).await.unwrap(),
+            12_990_000_000
+        );
+        assert_eq!(available_balance(&db, &fund).await.unwrap(), -2_000_000);
+        let funds = load_fund_users(&db).await.unwrap();
+        assert_eq!(funds.len(), 1);
+        assert_eq!(funds[0].available_usd_nanos, -2_000_000);
+
+        let page = load_admin_ledger(
+            &db,
+            admin_ledger_filters(AdminLedgerQuery {
+                kind: Some("adjustment".to_string()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.total, 2);
+        assert!(
+            page.entries
+                .iter()
+                .all(|entry| entry.status == "posted" && entry.posted_at.is_some())
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn admin_adjustments_reject_zero_overflow_and_unknown_targets_without_ledger_writes() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        for amount_usd_nanos in [0, i64::MIN] {
+            let error = post_admin_adjustment(
+                &db,
+                &AdminAdjustmentInput {
+                    user_id: user_id.clone(),
+                    amount_usd_nanos,
+                    note: None,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        let unknown = post_admin_adjustment(
+            &db,
+            &AdminAdjustmentInput {
+                user_id: Uuid::new_v4().to_string(),
+                amount_usd_nanos: 1_000,
+                note: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let entries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ledger_entries")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(entries, 0);
         let _ = std::fs::remove_file(path);
     }
 
