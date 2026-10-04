@@ -9,7 +9,7 @@ Midas is No Trade No Life's public blockchain payment infrastructure. It gives a
 - A customer opens Midas on a phone, finds their dedicated EVM deposit address, sends a supported stablecoin, checks the USD balance after automatic discovery, can claim a missed deposit by network and TxID, transfers to another Midas user, withdraws, and reviews their immutable history.
 - A root operator can create a fund user for an integrating application such as 1Exchange or OpenAI LB. A fund user has a transferable Midas user ID, USD balance, and immutable ledger, but no EVM address or blockchain operations; its API key can read its balance and ledger and create internal transfers using idempotency keys.
 - A channel owner creates an automatic-payment agreement, then explicitly rotates its API key and receives that value once. Any Midas user, including the owner, signs in to a focused authorization page before the channel can charge that user's available balance.
-- The root operator initializes the instance once, sets supported EVM networks/assets, and configures the gas and collection wallets without exposing their private keys through read APIs.
+- The root operator initializes the instance once, sets supported EVM networks/assets, and configures the gas and collection wallets without exposing their private keys through read APIs. The root operator can also post direct signed USD balance adjustments to any human user or fund account; every adjustment is one immutable `adjustment` ledger entry with an optional note, visible in that account's history and in the global ledger.
 
 ## Payment model
 

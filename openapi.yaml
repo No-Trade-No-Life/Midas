@@ -386,6 +386,18 @@ paths:
         '200':
           description: Fund user ledger
           content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/LedgerEntry' } } } }
+  /admin/adjustments:
+    post:
+      summary: Root-only direct USD balance adjustment for any Midas user or fund account; posts one immutable adjustment ledger entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminAdjustmentInput' }
+      responses:
+        '200':
+          description: The posted adjustment entry. Positive amounts credited the balance; negative amounts debited it.
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminLedgerEntry' } } }
   /admin/balances:
     get:
       summary: Root-only all-user USD balance list and aggregate settlement exposure
@@ -557,6 +569,13 @@ components:
         users:
           type: array
           items: { $ref: '#/components/schemas/AdminUserBalance' }
+    AdminAdjustmentInput:
+      type: object
+      required: [user_id, amount_usd_nanos]
+      properties:
+        user_id: { type: string, format: uuid, description: Any existing Midas human user or fund account. }
+        amount_usd_nanos: { type: integer, format: int64, description: Signed exact USD nanodollars; positive credits the balance, negative debits it, and zero is rejected. }
+        note: { type: string, maxLength: 280, description: Operator note stored on the immutable adjustment ledger entry. }
     AdminLedgerEntry:
       allOf:
         - { $ref: '#/components/schemas/LedgerEntry' }

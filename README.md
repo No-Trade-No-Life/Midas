@@ -13,7 +13,7 @@
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary with automatic redirect to sign-in; Midas has no unauthenticated home page.
 - A scannable QR code for the dedicated deposit address.
 - Linkit React Components, including the zero-prop `LinkitMyInfo` account control and `LinkitUserPicker` for username-based transfer recipients.
-- A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, and filterable, paginated global ledger review.
+- A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, direct signed USD balance adjustments, and filterable, paginated global ledger review.
 - Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has no EVM wallet or blockchain API surface: its transferable Midas user ID, balance, immutable history, and one-time API key are for internal transfers only. Its API key can also read the exact cumulative transfers received from a specified Midas user, so an application can treat its fund user as a public recharge account without asking users to authorize automatic charges.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
 - Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page. Its API key can then make idempotent USD charges and ledger-only payouts against authorized users. A payout returns USD from the channel owner to the user and never requests an on-chain withdrawal.
@@ -99,6 +99,10 @@ POST /api/agreements/{id}/api-key
 
 A root operator creates and rotates fund users through `POST /api/admin/fund-users`
 and `POST /api/admin/fund-users/{id}/api-key`. The plaintext key is returned once.
+The root operator can also adjust any human or fund account's USD balance directly
+through `POST /api/admin/adjustments`. Each adjustment is one immutable
+`adjustment` ledger entry with an optional operator note, and it appears in the
+account's own history and in the global ledger.
 With `X-Api-Key`, a fund user may call `GET /api/balances/me`, `GET /api/ledger/me`,
 `GET /api/internal-transfers/me/inbound/{sender_user_id}`, the batched
 `POST /api/internal-transfers/me/inbound/summary`, and `POST /api/transfers`.
