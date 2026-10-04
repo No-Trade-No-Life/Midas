@@ -175,7 +175,9 @@ CREATE TABLE IF NOT EXISTS internal_transfers (
 CREATE TABLE IF NOT EXISTS adjustments (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
-  operator_user_id TEXT NOT NULL REFERENCES users(id),
+  -- Audit snapshot of the acting root operator's Auth Mini user ID. It is
+  -- deliberately not a foreign key: the audit record must stand on its own.
+  operator_user_id TEXT NOT NULL,
   ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
