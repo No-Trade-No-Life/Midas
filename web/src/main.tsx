@@ -32,6 +32,7 @@ import {
   WalletCardsIcon,
 } from "lucide-react"
 
+import { MidasMark } from "@/components/midas-mark"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -181,7 +182,7 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
     <div className="min-w-0">
     <header className="sticky top-0 border-b bg-background">
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-        <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} className="lg:hidden" size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button>{auth.isAuthenticated && <Button aria-label={navigationCollapsed ? t("menu") : t("appName")} className="hidden lg:inline-flex" size="icon" variant="ghost" onClick={() => setNavigationCollapsed(value => !value)}>{navigationCollapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}</Button>}<Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><LandmarkIcon aria-hidden="true" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
+        <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} className="lg:hidden" size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button>{auth.isAuthenticated && <Button aria-label={navigationCollapsed ? t("menu") : t("appName")} className="hidden lg:inline-flex" size="icon" variant="ghost" onClick={() => setNavigationCollapsed(value => !value)}>{navigationCollapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}</Button>}<Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><MidasMark className="size-6 shrink-0" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
         <div className="flex shrink-0 items-center gap-1">
           <LinkitMyInfo />
         </div>
@@ -218,7 +219,7 @@ function DesktopNavigation({ collapsed, root, t }: { collapsed: boolean; root: b
   return <aside className="sticky top-0 hidden h-svh min-h-0 flex-col border-r bg-muted/30 lg:flex" data-collapsed={collapsed}>
     <div className="flex min-h-0 flex-1 flex-col gap-5 p-3">
       <div className={cn("flex items-center gap-2", collapsed && "justify-center")}>
-        <Link to="/" className="flex min-w-0 items-center gap-2 rounded-md p-1 font-semibold focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"><div className="grid size-7 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><LandmarkIcon /></div>{!collapsed && <span className="truncate">{t("appName")}</span>}</Link>
+        <Link to="/" className="flex min-w-0 items-center gap-2 rounded-md p-1 font-semibold focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"><MidasMark className="size-7 shrink-0" />{!collapsed && <span className="truncate">{t("appName")}</span>}</Link>
       </div>
       <nav aria-label={t("menu")} className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
         <NavigationSection collapsed={collapsed} label={t("account")}>{item("/", t("home"), <WalletCardsIcon data-icon="inline-start" />)}{item("/activity", t("activity"), <HistoryIcon data-icon="inline-start" />)}{item("/withdrawal-address-book", t("withdrawalAddressBook"), <ArrowUpFromLineIcon data-icon="inline-start" />)}{item("/automatic-receipts", t("automaticReceipts"), <ArrowDownToLineIcon data-icon="inline-start" />)}{item("/automatic-payments", t("automaticPayments"), <ArrowLeftRightIcon data-icon="inline-start" />)}</NavigationSection>
