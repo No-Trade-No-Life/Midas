@@ -4375,6 +4375,21 @@ fn withdrawal_gas_budget(reservation: Option<&str>) -> Result<U256, ApiError> {
     }
 }
 
+// A signed withdrawal waits for inclusion with a gas price that can never be
+// raised afterwards, so the accepting block's base fee must stay under it.
+// Quote with headroom over the current gas price instead of the bare quote;
+// the reservation already budgets this margin with twice the quoted price.
+// ASSUMPTION: doubling the quoted gas price approximates a fee ceiling that
+// stays above the base fee until inclusion. If it is too small, the node
+// rejects the broadcast and the withdrawal stays pending and retryable; if it
+// is too large, the withdrawal pays up to twice the quoted price, which the
+// reservation budget check still bounds.
+fn withdrawal_gas_fee(quoted: U256) -> Result<U256, ApiError> {
+    quoted
+        .checked_mul(U256::from(2))
+        .ok_or_else(|| ApiError::conflict("gas price overflow"))
+}
+
 async fn sign_withdrawal(
     db: &SqlitePool,
     withdrawal_id: &str,
@@ -4415,7 +4430,8 @@ async fn sign_withdrawal(
         )
         .await
         .map_err(chain_error)?;
-    let gas_price = provider.get_gas_price().await.map_err(chain_error)?;
+    let quoted_gas_price = provider.get_gas_price().await.map_err(chain_error)?;
+    let gas_price = withdrawal_gas_fee(quoted_gas_price)?;
     let mut transaction: TypedTransaction = TransactionRequest::new()
         .from(wallet.address())
         .to(contract_address)
@@ -6013,6 +6029,15 @@ mod tests {
         );
         assert_eq!(withdrawal_gas_budget(Some("42")).unwrap(), U256::from(42));
         assert!(withdrawal_gas_budget(Some("not-a-number")).is_err());
+    }
+
+    #[test]
+    fn withdrawal_signing_fee_doubles_the_quoted_gas_price() {
+        assert_eq!(
+            withdrawal_gas_fee(U256::from(20_000_000)).unwrap(),
+            U256::from(40_000_000)
+        );
+        assert!(withdrawal_gas_fee(U256::MAX).is_err());
     }
 
     #[tokio::test]
