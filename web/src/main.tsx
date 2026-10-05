@@ -33,6 +33,7 @@ import {
 } from "lucide-react"
 
 import { MidasMark } from "@/components/midas-mark"
+import { watchFavicon } from "@/lib/favicon"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -739,4 +740,5 @@ function isMidasUserId(value: string) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0
 function transferCheckout(searchParams: URLSearchParams) { const recipientUserId = searchParams.get("recipient_user_id") ?? ""; const rawAmount = searchParams.get("amount_usd_nanos") ?? ""; if (!isMidasUserId(recipientUserId) || !/^[1-9]\d*$/.test(rawAmount)) return null; const amount = BigInt(rawAmount); return amount <= BigInt(Number.MAX_SAFE_INTEGER) ? { recipientUserId, amountUsdNanos: Number(amount) } : null }
 function subjectFromToken(token?: string) { try { const value = token?.split(".")[1]; return value ? JSON.parse(atob(value.replace(/-/g, "+").replace(/_/g, "/"))).sub as string : null } catch { return null } }
 
+watchFavicon()
 createRoot(document.getElementById("root")!).render(<AppRoot />)
