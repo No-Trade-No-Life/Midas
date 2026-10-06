@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
-    "test": "node scripts/check-boundaries.mjs && node --experimental-strip-types --test scripts/withdrawal-availability.test.mjs scripts/brand-mark.test.mjs && npm run build"
+    "test": "node scripts/check-boundaries.mjs && node scripts/check-layout-theme.mjs && node --experimental-strip-types --test scripts/withdrawal-availability.test.mjs scripts/brand-mark.test.mjs && npm run build"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -20,7 +20,6 @@
     "cn": "^0.2.5",
     "linkit-react-components": "^0.4.0",
     "lucide-react": "^1.21.0",
-    "next-themes": "^0.4.6",
     "qrcode.react": "^4.2.0",
     "react": "latest",
     "react-dom": "latest",

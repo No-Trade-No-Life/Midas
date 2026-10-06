@@ -4,22 +4,25 @@ import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider, type UseQueryResult, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { AuthMiniProvider, useAuthMini } from "auth-mini-react-components"
 import { LinkitMyInfo, LinkitProvider, LinkitUserInfo, LinkitUserPicker, useLinkit } from "linkit-react-components"
-import { ThemeProvider } from "next-themes"
 import { QRCodeSVG } from "qrcode.react"
-import { HashRouter, Link, Route, Routes, useLocation, useSearchParams } from "react-router-dom"
+import { HashRouter, Link, NavLink, Route, Routes, useLocation, useSearchParams } from "react-router-dom"
 import { toast } from "sonner"
 import {
+  type LucideIcon,
   ArrowDownToLineIcon,
   ArrowLeftRightIcon,
   ArrowUpFromLineIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  CircleCheckIcon,
   ClipboardCopyIcon,
   ExternalLinkIcon,
   HistoryIcon,
   LandmarkIcon,
   LoaderCircleIcon,
   MenuIcon,
+  MonitorIcon,
+  MoonIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   RefreshCwIcon,
@@ -28,11 +31,14 @@ import {
   SearchIcon,
   SettingsIcon,
   ShieldCheckIcon,
+  SunIcon,
   UsersRoundIcon,
   WalletCardsIcon,
 } from "lucide-react"
 
 import { MidasMark } from "@/components/midas-mark"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { startThemeSync, useTheme, type ThemeChoice } from "@/theme"
 import { watchFavicon } from "@/lib/favicon"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -90,7 +96,7 @@ type CustodyBalances = { custody_wallet_address: string | null; networks: Custod
 const messages = {
   en: {
     withdrawalAvailability: "Withdrawal availability", liquidityReady: "Ready", immediateCapacity: "Immediate capacity", gasSufficiency: "Gas", gasReady: "Sufficient", gasUnknown: "Unknown", observedAt: "Observed", liquidityLoading: "Checking availability…", liquidityHint: "Shared capacity after pending withdrawals. Availability is checked again when you submit.", liquidityExceeded: "Amount exceeds immediate capacity.", not_configured: "Withdrawals are not configured yet.", rpc_unavailable: "Network data is temporarily unavailable. Try again shortly.", insufficient_gas: "Network gas is insufficient. Try another network or wait for replenishment.", insufficient_liquidity: "Token liquidity is insufficient. Try another asset or network.",
-    appName: "Midas", menu: "Menu", home: "Home", activity: "Activity", settings: "Settings", account: "Account", administration: "Administration", custody: "Custody wallet", depositDiscovery: "Deposit discovery", userBalances: "User balances", globalLedger: "Global ledger", language: "Language", english: "English", chinese: "中文",
+    appName: "Midas", menu: "Menu", openNavigation: "Open navigation", collapseNavigation: "Collapse navigation", expandNavigation: "Expand navigation", skipToMainContent: "Skip to main content", home: "Home", activity: "Activity", settings: "Settings", account: "Account", administration: "Administration", custody: "Custody wallet", depositDiscovery: "Deposit discovery", userBalances: "User balances", globalLedger: "Global ledger", language: "Language", appearance: "Appearance", appearanceHint: "Light, dark, or follow the system", themeLight: "Light", themeDark: "Dark", themeSystem: "System", english: "English", chinese: "中文",
     balance: "Available balance", usdOnly: "USD ledger", deposit: "Deposit", transfer: "Transfer", withdraw: "Withdraw", depositAddress: "Your deposit address", depositAddressHint: "This single EVM-compatible address works on every supported network.", depositQrHint: "Scan to copy this deposit address", copy: "Copy", copied: "Address copied", noAddress: "Your dedicated EVM address is being prepared. Refresh shortly.",
     noActivity: "No activity yet", noActivityBody: "Confirmed deposits, transfers, and withdrawals appear here as immutable USD entries.", amount: "Amount", status: "Status", asset: "Asset", blockchain: "Blockchain", transaction: "Transaction", action: "Action", user: "User", operator: "Operator", time: "Time", reference: "Reference", details: "Details", viewOnExplorer: "View on explorer",
     depositTitle: "Deposit USDC or USDT", depositBody: "Send any supported USDC or USDT to your dedicated address. Midas discovers the transaction automatically, then verifies its final on-chain receipt before crediting your USD balance.", depositDiscoveryDelay: "Discovery runs in the background. A deposit normally appears within about 30 seconds at the current account size.", supportedAssets: "Supported assets", network: "Network", transactionHash: "Transaction hash", confirmDeposit: "Confirm deposit", depositNotReceived: "Deposit not received?", claimDepositTitle: "Find a deposit", claimDepositBody: "Choose the network and paste the completed transaction ID. Midas derives the token and amount from the final on-chain receipt before it credits your USD balance.", claimDepositHint: "Only the network and transaction ID are needed. A transaction can be credited only once.", claimDeposit: "Verify and credit", depositClaimed: "Deposit credited",
@@ -108,7 +114,7 @@ const messages = {
   },
   zh: {
     withdrawalAvailability: "提现可用情况", liquidityReady: "可提现", immediateCapacity: "即时可提现容量", gasSufficiency: "Gas", gasReady: "充足", gasUnknown: "未知", observedAt: "观测时间", liquidityLoading: "正在检查提现可用情况…", liquidityHint: "已扣除未完成提现的共享容量；提交时会再次校验。", liquidityExceeded: "金额超过即时可提现容量。", not_configured: "提现尚未配置完成。", rpc_unavailable: "网络数据暂不可用，请稍后重试。", insufficient_gas: "网络 Gas 不足，请切换网络或等待补充。", insufficient_liquidity: "代币流动性不足，请切换代币或网络。",
-    appName: "Midas", menu: "菜单", home: "首页", activity: "流水", settings: "设置", account: "账户", administration: "后台管理", custody: "托管钱包", depositDiscovery: "充值发现", userBalances: "用户余额", globalLedger: "全局流水", language: "语言", english: "English", chinese: "中文",
+    appName: "Midas", menu: "菜单", openNavigation: "打开导航", collapseNavigation: "收起导航", expandNavigation: "展开导航", skipToMainContent: "跳转到主要内容", home: "首页", activity: "流水", settings: "设置", account: "账户", administration: "后台管理", custody: "托管钱包", depositDiscovery: "充值发现", userBalances: "用户余额", globalLedger: "全局流水", language: "语言", appearance: "外观", appearanceHint: "浅色、深色或跟随系统", themeLight: "浅色", themeDark: "深色", themeSystem: "跟随系统", english: "English", chinese: "中文",
     balance: "可用余额", usdOnly: "USD 账本", deposit: "充值", transfer: "转账", withdraw: "提现", depositAddress: "你的充值地址", depositAddressHint: "同一个 EVM 兼容地址可用于所有已支持的网络。", depositQrHint: "扫描二维码获取充值地址", copy: "复制", copied: "地址已复制", noAddress: "专属 EVM 地址正在准备，请稍后刷新。",
     noActivity: "暂无流水", noActivityBody: "确认后的充值、转账和提现会以不可变的 USD 记录显示在这里。", amount: "金额", status: "状态", asset: "资产", blockchain: "区块链", transaction: "交易", action: "动作", user: "用户", operator: "操作人", time: "时间", reference: "参考号", details: "详情", viewOnExplorer: "在区块浏览器中查看",
     depositTitle: "充值 USDC 或 USDT", depositBody: "将任一支持的 USDC 或 USDT 转入你的专属地址。Midas 会自动发现交易，并在通过最终链上回执验证后才记入 USD 余额。", depositDiscoveryDelay: "后台会自动发现充值。按当前账户数量，通常约 30 秒内显示。", supportedAssets: "支持的资产", network: "网络", transactionHash: "交易哈希", confirmDeposit: "确认充值", depositNotReceived: "充值没有到账？", claimDepositTitle: "补录充值", claimDepositBody: "选择网络并填入已经完成的交易哈希。Midas 会从最终链上回执推导代币和金额，通过验证后才计入 USD 余额。", claimDepositHint: "只需要网络和交易哈希；同一笔交易只能入账一次。", claimDeposit: "核验并入账", depositClaimed: "充值已入账",
@@ -143,6 +149,55 @@ class ApiError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 
+type MessageKey = keyof typeof messages.en
+
+const navigationCollapsedStorageKey = "midas.navigation.collapsed.v1"
+
+type NavigationItem = { id: string; label: MessageKey; path: string; icon: LucideIcon }
+type NavigationGroupConfig = { id: "account" | "settings" | "administration"; label: MessageKey; items: NavigationItem[] }
+
+const accountNavigationItems: NavigationItem[] = [
+  { id: "home", label: "home", path: "/", icon: WalletCardsIcon },
+  { id: "activity", label: "activity", path: "/activity", icon: HistoryIcon },
+  { id: "withdrawal-address-book", label: "withdrawalAddressBook", path: "/withdrawal-address-book", icon: ArrowUpFromLineIcon },
+  { id: "automatic-receipts", label: "automaticReceipts", path: "/automatic-receipts", icon: ArrowDownToLineIcon },
+  { id: "automatic-payments", label: "automaticPayments", path: "/automatic-payments", icon: ArrowLeftRightIcon },
+]
+
+const settingsNavigationItems: NavigationItem[] = [{ id: "settings", label: "settings", path: "/settings", icon: SettingsIcon }]
+
+const administrationNavigationItems: NavigationItem[] = [
+  { id: "custody", label: "custody", path: "/admin/custody", icon: ShieldCheckIcon },
+  { id: "deposit-discovery", label: "depositDiscovery", path: "/admin/deposit-discovery", icon: SearchIcon },
+  { id: "collections", label: "collectionOperations", path: "/admin/collections", icon: LandmarkIcon },
+  { id: "withdrawals", label: "withdrawalOperations", path: "/admin/withdrawals", icon: ArrowUpFromLineIcon },
+  { id: "fund-users", label: "fundUsers", path: "/admin/fund-users", icon: UsersRoundIcon },
+  { id: "balances", label: "userBalances", path: "/admin/balances", icon: UsersRoundIcon },
+  { id: "ledger", label: "globalLedger", path: "/admin/ledger", icon: ScrollTextIcon },
+]
+
+const mobileNavigationItems: NavigationItem[] = [
+  { id: "home", label: "home", path: "/", icon: WalletCardsIcon },
+  { id: "activity", label: "activity", path: "/activity", icon: HistoryIcon },
+  { id: "settings", label: "settings", path: "/settings", icon: SettingsIcon },
+]
+
+function visibleNavigationGroups(root: boolean): NavigationGroupConfig[] {
+  const groups: NavigationGroupConfig[] = [
+    { id: "account", label: "account", items: accountNavigationItems },
+    { id: "settings", label: "settings", items: settingsNavigationItems },
+  ]
+  if (root) groups.push({ id: "administration", label: "administration", items: administrationNavigationItems })
+  return groups
+}
+
+const extraPageTitles: Partial<Record<string, MessageKey>> = { "/transfer": "transferCheckoutTitle", "/sign_agreement": "signAgreement" }
+
+function pageTitle(pathname: string): MessageKey {
+  const item = [...accountNavigationItems, ...settingsNavigationItems, ...administrationNavigationItems].find((entry) => entry.path === pathname)
+  return item?.label ?? extraPageTitles[pathname] ?? "appName"
+}
+
 function AppRoot() {
   const [config, setConfig] = useState<AuthConfig>(fallbackConfig)
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 10_000 } } }))
@@ -151,14 +206,12 @@ function AppRoot() {
     void fetch("/api/auth/config").then(async (response) => response.ok ? response.json() as Promise<AuthConfig> : fallbackConfig).then(setConfig).catch(() => undefined)
   }, [])
 
-  return <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
-    <QueryClientProvider client={client}>
-      <AuthMiniProvider authMiniBaseUrl={config.auth_mini_base_url} audiences={config.audiences} autoRedirectToLogin>
-        <HashRouter><App linkitBaseUrl={config.linkit_base_url} /></HashRouter>
-        <GlobalToaster />
-      </AuthMiniProvider>
-    </QueryClientProvider>
-  </ThemeProvider>
+  return <QueryClientProvider client={client}>
+    <AuthMiniProvider authMiniBaseUrl={config.auth_mini_base_url} audiences={config.audiences} autoRedirectToLogin>
+      <HashRouter><App linkitBaseUrl={config.linkit_base_url} /></HashRouter>
+      <GlobalToaster />
+    </AuthMiniProvider>
+  </QueryClientProvider>
 }
 
 function GlobalToaster() {
@@ -168,28 +221,26 @@ function GlobalToaster() {
 function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
   const [language, setLanguage] = useState<Language>(() => window.localStorage.getItem("midas-language") === "zh" ? "zh" : "en")
   const [navigationOpen, setNavigationOpen] = useState(false)
-  const [navigationCollapsed, setNavigationCollapsed] = useState(false)
-  const t = (key: keyof typeof messages.en) => messages[language][key]
+  const [navigationCollapsed, setNavigationCollapsed] = useState(() => window.localStorage.getItem(navigationCollapsedStorageKey) === "true")
+  const t = (key: MessageKey) => messages[language][key]
   const auth = useAuthMini()
   const location = useLocation()
   const setup = useQuery({ queryKey: ["setup"], queryFn: () => publicRequest<SetupStatus>("/api/setup/status") })
   const currentUserId = subjectFromToken(auth.session?.accessToken ?? undefined)
   const root = Boolean(setup.data?.initialized && setup.data.root_user_id === currentUserId)
+  const focusedFlow = location.pathname === "/transfer" || location.pathname === "/sign_agreement"
+  const showTabBar = auth.isAuthenticated && !focusedFlow
 
   useEffect(() => { window.localStorage.setItem("midas-language", language) }, [language])
+  useEffect(() => { window.localStorage.setItem(navigationCollapsedStorageKey, String(navigationCollapsed)) }, [navigationCollapsed])
+  useEffect(() => { setNavigationOpen(false) }, [location.pathname])
 
-  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><LinkitLanguageSync setLanguage={setLanguage} /><div className={cn("min-h-dvh bg-background", auth.isAuthenticated && "lg:grid", auth.isAuthenticated && (navigationCollapsed ? "lg:grid-cols-[3rem_minmax(0,1fr)]" : "lg:grid-cols-[16rem_minmax(0,1fr)]"))}>
+  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><LinkitLanguageSync setLanguage={setLanguage} /><div className={cn("min-h-dvh bg-muted/30", auth.isAuthenticated && "lg:grid", auth.isAuthenticated && (navigationCollapsed ? "lg:grid-cols-[3rem_minmax(0,1fr)]" : "lg:grid-cols-[16rem_minmax(0,1fr)]"))}>
     {auth.isAuthenticated && <DesktopNavigation collapsed={navigationCollapsed} root={root} t={t} />}
     <div className="min-w-0">
-    <header className="sticky top-0 border-b bg-background">
-      <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-        <div className="flex min-w-0 items-center gap-2"><Button aria-label={t("menu")} className="lg:hidden" size="icon" variant="ghost" onClick={() => setNavigationOpen(true)}><MenuIcon /></Button>{auth.isAuthenticated && <Button aria-label={navigationCollapsed ? t("menu") : t("appName")} className="hidden lg:inline-flex" size="icon" variant="ghost" onClick={() => setNavigationCollapsed(value => !value)}>{navigationCollapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}</Button>}<Link to="/" className="flex min-w-0 items-center gap-2 font-medium"><MidasMark className="size-6 shrink-0" /> <span className="truncate">{t("appName")}</span><Badge variant="secondary">USD</Badge></Link></div>
-        <div className="flex shrink-0 items-center gap-1">
-          <LinkitMyInfo />
-        </div>
-      </div>
-    </header>
-    <main id="main-content" className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
+    <a className="skip-link" href="#main-content">{t("skipToMainContent")}</a>
+    <AppHeader authenticated={auth.isAuthenticated} collapsed={navigationCollapsed} pathname={location.pathname} t={t} onOpenNavigation={() => setNavigationOpen(true)} onToggleNavigation={() => setNavigationCollapsed((value) => !value)} />
+    <main id="main-content" className={cn("mx-auto w-full max-w-5xl px-4 pt-6 sm:px-6 sm:pt-8", showTabBar ? "pb-24 lg:pb-8" : "pb-6 sm:pb-8")}>
       <Routes>
         <Route path="/" element={<Dashboard t={t} language={language} />} />
         <Route path="/activity" element={<ActivityPage t={t} />} />
@@ -209,30 +260,62 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
         <Route path="*" element={<Dashboard t={t} language={language} />} />
       </Routes>
     </main>
-    {auth.isAuthenticated && <NavigationDrawer currentPath={location.pathname} t={t} root={root} open={navigationOpen} setOpen={setNavigationOpen} />}
+    {showTabBar ? <MobileNavigationBar t={t} /> : null}
+    {auth.isAuthenticated && <NavigationDrawer t={t} root={root} open={navigationOpen} setOpen={setNavigationOpen} />}
     </div>
   </div></LinkitProvider>
 }
 
 function DesktopNavigation({ collapsed, root, t }: { collapsed: boolean; root: boolean; t: Translate }) {
-  const location = useLocation()
-  const item = (path: string, label: string, icon: React.ReactNode) => <Button key={path} aria-label={collapsed ? label : undefined} className={cn("w-full justify-start", collapsed && "justify-center px-0")} title={collapsed ? label : undefined} variant={location.pathname === path ? "secondary" : "ghost"} render={<Link to={path} />} nativeButton={false}>{icon}{!collapsed && <span className="truncate">{label}</span>}</Button>
-  return <aside className="sticky top-0 hidden h-svh min-h-0 flex-col border-r bg-muted/30 lg:flex" data-collapsed={collapsed}>
-    <div className="flex min-h-0 flex-1 flex-col gap-5 p-3">
-      <div className={cn("flex items-center gap-2", collapsed && "justify-center")}>
-        <Link to="/" className="flex min-w-0 items-center gap-2 rounded-md p-1 font-semibold focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"><MidasMark className="size-7 shrink-0" />{!collapsed && <span className="truncate">{t("appName")}</span>}</Link>
-      </div>
-      <nav aria-label={t("menu")} className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
-        <NavigationSection collapsed={collapsed} label={t("account")}>{item("/", t("home"), <WalletCardsIcon data-icon="inline-start" />)}{item("/activity", t("activity"), <HistoryIcon data-icon="inline-start" />)}{item("/withdrawal-address-book", t("withdrawalAddressBook"), <ArrowUpFromLineIcon data-icon="inline-start" />)}{item("/automatic-receipts", t("automaticReceipts"), <ArrowDownToLineIcon data-icon="inline-start" />)}{item("/automatic-payments", t("automaticPayments"), <ArrowLeftRightIcon data-icon="inline-start" />)}</NavigationSection>
-        <NavigationSection collapsed={collapsed} label={t("settings")}>{item("/settings", t("settings"), <SettingsIcon data-icon="inline-start" />)}</NavigationSection>
-        {root && <NavigationSection collapsed={collapsed} label={t("administration")}>{item("/admin/custody", t("custody"), <ShieldCheckIcon data-icon="inline-start" />)}{item("/admin/deposit-discovery", t("depositDiscovery"), <SearchIcon data-icon="inline-start" />)}{item("/admin/collections", t("collectionOperations"), <LandmarkIcon data-icon="inline-start" />)}{item("/admin/withdrawals", t("withdrawalOperations"), <ArrowUpFromLineIcon data-icon="inline-start" />)}{item("/admin/fund-users", t("fundUsers"), <UsersRoundIcon data-icon="inline-start" />)}{item("/admin/balances", t("userBalances"), <UsersRoundIcon data-icon="inline-start" />)}{item("/admin/ledger", t("globalLedger"), <ScrollTextIcon data-icon="inline-start" />)}</NavigationSection>}
+  return <aside className="sticky top-0 hidden h-svh min-h-0 flex-col border-r bg-background lg:flex" data-collapsed={collapsed}>
+    <div className="flex h-full min-h-0 flex-col gap-2 p-2">
+      <Link to="/" className={cn("flex min-w-0 items-center rounded-md p-2 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50", collapsed ? "justify-center" : "gap-2")}><MidasMark className="size-7 shrink-0" />{!collapsed && <strong className="min-w-0 truncate text-sm font-semibold leading-tight">{t("appName")}</strong>}</Link>
+      <Separator />
+      <nav aria-label={t("menu")} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
+        {visibleNavigationGroups(root).map((group) => <NavigationGroup collapsed={collapsed} compact group={group} key={group.id} onNavigate={undefined} t={t} />)}
       </nav>
     </div>
   </aside>
 }
 
-function NavigationSection({ collapsed, label, children }: { collapsed: boolean; label: string; children: React.ReactNode }) {
-  return <section className="flex flex-col gap-1">{!collapsed && <h2 className="px-2 text-xs font-medium text-muted-foreground">{label}</h2>}{children}</section>
+function NavigationGroup({ collapsed, compact, group, onNavigate, t }: { collapsed: boolean; compact: boolean; group: NavigationGroupConfig; onNavigate: (() => void) | undefined; t: Translate }) {
+  return <section className="flex flex-col gap-0.5">{!collapsed ? <p className="flex h-8 items-center px-2 text-xs font-medium text-muted-foreground">{t(group.label)}</p> : null}{group.items.map((item) => <NavigationLink collapsed={collapsed} compact={compact} item={item} key={item.id} onNavigate={onNavigate} t={t} />)}</section>
+}
+
+function NavigationLink({ collapsed, compact, item, onNavigate, t }: { collapsed: boolean; compact: boolean; item: NavigationItem; onNavigate: (() => void) | undefined; t: Translate }) {
+  const Icon = item.icon
+  return <NavLink aria-label={collapsed ? t(item.label) : undefined} title={collapsed ? t(item.label) : undefined} className={({ isActive }) => cn("flex w-full items-center gap-2 rounded-md px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50", compact ? "h-8" : "min-h-11", collapsed && "size-8 justify-center px-0", isActive && "bg-muted text-foreground")} to={item.path} onClick={onNavigate}><Icon className="size-4 shrink-0" />{!collapsed ? <span className="min-w-0 truncate">{t(item.label)}</span> : null}</NavLink>
+}
+
+function AppHeader({ authenticated, collapsed, pathname, t, onOpenNavigation, onToggleNavigation }: { authenticated: boolean; collapsed: boolean; pathname: string; t: Translate; onOpenNavigation: () => void; onToggleNavigation: () => void }) {
+  return <header className="sticky top-0 z-40 flex h-14 items-center border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-6">
+    <div className="mx-auto flex w-full max-w-5xl items-center gap-3">
+      {authenticated ? <Button aria-label={t("openNavigation")} className="lg:hidden" size="icon" title={t("openNavigation")} variant="outline" onClick={onOpenNavigation}><MenuIcon /></Button> : null}
+      {authenticated ? <Button aria-label={collapsed ? t("expandNavigation") : t("collapseNavigation")} className="hidden lg:inline-flex" size="icon" title={collapsed ? t("expandNavigation") : t("collapseNavigation")} variant="outline" onClick={onToggleNavigation}>{collapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}</Button> : null}
+      {authenticated ? <Separator className="h-5" orientation="vertical" /> : null}
+      <div className="min-w-0 flex-1"><h1 className="truncate text-sm font-medium">{authenticated ? t(pageTitle(pathname)) : t("appName")}</h1></div>
+      <div className="flex shrink-0 items-center gap-2"><ThemeSwitcher t={t} /><LinkitMyInfo /></div>
+    </div>
+  </header>
+}
+
+const themeChoiceOptions: readonly ThemeChoice[] = ["light", "dark", "system"]
+const themeChoiceIcons: Record<ThemeChoice, LucideIcon> = { light: SunIcon, dark: MoonIcon, system: MonitorIcon }
+
+function themeChoiceLabel(choice: ThemeChoice, t: Translate) {
+  return choice === "light" ? t("themeLight") : choice === "dark" ? t("themeDark") : t("themeSystem")
+}
+
+function ThemeSwitcher({ t }: { t: Translate }) {
+  const { choice, setChoice } = useTheme()
+  const ActiveIcon = themeChoiceIcons[choice]
+  return <DropdownMenu><DropdownMenuTrigger render={<Button aria-label={t("appearance")} size="icon" title={t("appearance")} variant="outline"><ActiveIcon /></Button>} /><DropdownMenuContent align="end" className="w-40"><DropdownMenuGroup><DropdownMenuLabel>{t("appearance")}</DropdownMenuLabel>{themeChoiceOptions.map((option) => <DropdownMenuItem className={cn(option === choice && "bg-muted text-foreground")} key={option} onClick={() => setChoice(option)}><span className="grid size-4 place-items-center">{option === choice ? <CircleCheckIcon className="size-3.5" /> : null}</span><span>{themeChoiceLabel(option, t)}</span></DropdownMenuItem>)}</DropdownMenuGroup></DropdownMenuContent></DropdownMenu>
+}
+
+function MobileNavigationBar({ t }: { t: Translate }) {
+  return <nav aria-label={t("menu")} className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur supports-[backdrop-filter]:bg-background/80 lg:hidden">
+    <div className="mx-auto grid w-full max-w-5xl grid-cols-3">{mobileNavigationItems.map((item) => { const Icon = item.icon; return <NavLink className={({ isActive }) => cn("flex min-h-14 flex-col items-center justify-center gap-0.5 text-xs text-muted-foreground", isActive && "font-medium text-foreground")} key={item.id} to={item.path}><Icon className="size-5" /><span>{t(item.label)}</span></NavLink> })}</div>
+  </nav>
 }
 
 function Dashboard({ t, language }: { t: Translate; language: Language }) {
@@ -380,9 +463,11 @@ function UsdField({ t, amount, setAmount }: { t: Translate; amount: string; setA
 function SettingsPage({ t, setup, currentUserId }: { t: Translate; setup?: SetupStatus; currentUserId: string | null }) {
   const api = useApi()
   const queryClient = useQueryClient()
+  const { choice, setChoice } = useTheme()
   const initialize = useMutation({ mutationFn: () => api<SetupStatus>("/api/setup/initialize", { method: "POST", body: { root_user_id: currentUserId } }), onSuccess: () => { toast.success(t("initialized")); void queryClient.invalidateQueries({ queryKey: ["setup"] }) }, onError: (error) => showApiError(error, t) })
   return <section className="flex flex-col gap-6"><div><p className="text-sm text-muted-foreground">{t("wallet")}</p><h1 className="text-2xl font-semibold tracking-tight">{t("settings")}</h1></div>
     {!setup?.initialized ? <Card><CardHeader><CardTitle>{t("setupTitle")}</CardTitle><CardDescription>{t("setupBody")}</CardDescription></CardHeader><CardFooter><Button disabled={!currentUserId || initialize.isPending} onClick={() => initialize.mutate()}>{initialize.isPending && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />}{t("initialize")}</Button></CardFooter></Card> : null}
+    <Card><CardHeader><CardTitle>{t("appearance")}</CardTitle><CardDescription>{t("appearanceHint")}</CardDescription></CardHeader><CardContent><div className="flex flex-wrap gap-2">{themeChoiceOptions.map((option) => <Button aria-pressed={choice === option} key={option} size="sm" variant={choice === option ? "secondary" : "outline"} onClick={() => setChoice(option)}>{themeChoiceLabel(option, t)}</Button>)}</div></CardContent></Card>
   </section>
 }
 
@@ -683,13 +768,8 @@ function AddressBookRow({ entry, t }: { entry: AddressBookEntry; t: Translate })
   return <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2">{editing ? <form onSubmit={(event) => { event.preventDefault(); rename.mutate() }}><FieldGroup className="flex-row items-center gap-2"><Field><FieldLabel className="sr-only" htmlFor={`address-book-label-${entry.id}`}>{t("addressLabel")}</FieldLabel><Input id={`address-book-label-${entry.id}`} value={label} onChange={(event) => setLabel(event.target.value)} maxLength={80} /></Field><Button size="sm" type="submit" disabled={rename.isPending || !label.trim()}>{t("saveAddress")}</Button><Button size="sm" type="button" variant="ghost" onClick={() => { setLabel(entry.label); setEditing(false) }}>{t("cancel")}</Button></FieldGroup></form> : <><span className="font-medium">{entry.label}</span><Badge variant="outline">{entry.chain_name}</Badge></>}</div><code className="block max-w-72 truncate text-xs text-muted-foreground">{entry.address}</code></div>{!editing ? <div className="flex items-center gap-1"><Button size="sm" variant="ghost" onClick={() => setEditing(true)}>{t("renameAddress")}</Button><Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate()}>{t("removeAddress")}</Button></div> : null}</div>
 }
 
-function NavigationDrawer({ currentPath, t, root, open, setOpen }: { currentPath: string; t: Translate; root: boolean; open: boolean; setOpen: (open: boolean) => void }) {
-  const item = (path: string, label: string, icon: React.ReactNode) => <Button key={path} variant={currentPath === path ? "secondary" : "ghost"} className="w-full justify-start" render={<Link to={path} />} nativeButton={false} onClick={() => setOpen(false)}>{icon}{label}</Button>
-  return <Drawer open={open} onOpenChange={setOpen} swipeDirection="left"><DrawerContent><DrawerHeader><DrawerTitle>{t("appName")}</DrawerTitle><DrawerDescription>{t("usdOnly")}</DrawerDescription></DrawerHeader><div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-4"><NavigationGroup label={t("account")}>{item("/", t("home"), <WalletCardsIcon data-icon="inline-start" />)}{item("/activity", t("activity"), <HistoryIcon data-icon="inline-start" />)}{item("/withdrawal-address-book", t("withdrawalAddressBook"), <ArrowUpFromLineIcon data-icon="inline-start" />)}{item("/automatic-receipts", t("automaticReceipts"), <ArrowDownToLineIcon data-icon="inline-start" />)}{item("/automatic-payments", t("automaticPayments"), <ArrowLeftRightIcon data-icon="inline-start" />)}{item("/settings", t("settings"), <SettingsIcon data-icon="inline-start" />)}</NavigationGroup>{root ? <NavigationGroup label={t("administration")}>{item("/admin/custody", t("custody"), <ShieldCheckIcon data-icon="inline-start" />)}{item("/admin/deposit-discovery", t("depositDiscovery"), <SearchIcon data-icon="inline-start" />)}{item("/admin/collections", t("collectionOperations"), <LandmarkIcon data-icon="inline-start" />)}{item("/admin/withdrawals", t("withdrawalOperations"), <ArrowUpFromLineIcon data-icon="inline-start" />)}{item("/admin/fund-users", t("fundUsers"), <UsersRoundIcon data-icon="inline-start" />)}{item("/admin/balances", t("userBalances"), <UsersRoundIcon data-icon="inline-start" />)}{item("/admin/ledger", t("globalLedger"), <ScrollTextIcon data-icon="inline-start" />)}</NavigationGroup> : null}</div></DrawerContent></Drawer>
-}
-
-function NavigationGroup({ label, children }: { label: string; children: React.ReactNode }) {
-  return <section className="flex flex-col gap-1"><h2 className="px-2 text-xs font-medium text-muted-foreground">{label}</h2><nav aria-label={label} className="flex flex-col gap-1">{children}</nav></section>
+function NavigationDrawer({ t, root, open, setOpen }: { t: Translate; root: boolean; open: boolean; setOpen: (open: boolean) => void }) {
+  return <Drawer open={open} onOpenChange={setOpen} swipeDirection="left"><DrawerContent><DrawerHeader><DrawerTitle className="flex items-center gap-3"><MidasMark className="size-9" />{t("appName")}</DrawerTitle><DrawerDescription className="sr-only">{t("usdOnly")}</DrawerDescription></DrawerHeader><nav aria-label={t("menu")} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-4">{visibleNavigationGroups(root).map((group) => <NavigationGroup collapsed={false} compact={false} group={group} key={group.id} onNavigate={() => setOpen(false)} t={t} />)}</nav></DrawerContent></Drawer>
 }
 
 function AdminRoute({ root, t, children }: { root: boolean; t: Translate; children: React.ReactNode }) {
@@ -740,5 +820,6 @@ function isMidasUserId(value: string) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0
 function transferCheckout(searchParams: URLSearchParams) { const recipientUserId = searchParams.get("recipient_user_id") ?? ""; const rawAmount = searchParams.get("amount_usd_nanos") ?? ""; if (!isMidasUserId(recipientUserId) || !/^[1-9]\d*$/.test(rawAmount)) return null; const amount = BigInt(rawAmount); return amount <= BigInt(Number.MAX_SAFE_INTEGER) ? { recipientUserId, amountUsdNanos: Number(amount) } : null }
 function subjectFromToken(token?: string) { try { const value = token?.split(".")[1]; return value ? JSON.parse(atob(value.replace(/-/g, "+").replace(/_/g, "/"))).sub as string : null } catch { return null } }
 
+startThemeSync()
 watchFavicon()
 createRoot(document.getElementById("root")!).render(<AppRoot />)
