@@ -12,7 +12,7 @@
 - One-time `app_meta.root_user_id` bootstrap plus a root-only, input-only custody-wallet private key. Its address is derived server-side and the same wallet funds gas, collects deposits, and signs withdrawals.
 - Auth Mini backend verification boundary and React `AuthMiniProvider` boundary with automatic redirect to sign-in; Midas has no unauthenticated home page.
 - A scannable QR code for the dedicated deposit address.
-- A collapsible navigation shell with light, dark, and system themes; the favicon and browser theme color follow the effective scheme.
+- A collapsible navigation shell with a one-click header light/dark toggle; a first visit follows the OS scheme, and the favicon and browser theme color follow the effective scheme.
 - Linkit React Components, including the zero-prop `LinkitMyInfo` account control and `LinkitUserPicker` for username-based transfer recipients.
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, direct signed USD balance adjustments, and filterable, paginated global ledger review.
 - Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has no EVM wallet or blockchain API surface: its transferable Midas user ID, balance, immutable history, and one-time API key are for internal transfers only. Its API key can also read the exact cumulative transfers received from a specified Midas user, so an application can treat its fund user as a public recharge account without asking users to authorize automatic charges.

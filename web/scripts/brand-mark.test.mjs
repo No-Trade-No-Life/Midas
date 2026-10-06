@@ -29,12 +29,12 @@ test('the favicon links the SVG mark', () => {
   assert.match(indexHtml, /<link rel="icon" type="image\/svg\+xml" href="\/midas-mark\.svg"\/>/);
 });
 
-test('the favicon follows the effective theme, not just the system scheme', () => {
+test('the favicon follows the effective theme when the header toggle flips it', () => {
   assert.ok(faviconSync.includes(dollarMark));
-  assert.match(faviconSync, /resolveDark\(currentThemeChoice\(\)\)/);
-  assert.match(faviconSync, /subscribe\(applyFavicon\)/);
+  assert.match(faviconSync, /FAVICON_STROKE/);
+  assert.match(faviconSync, /export function applyFavicon\(resolvedTheme: keyof typeof FAVICON_STROKE\)/);
   assert.match(faviconSync, /data:image\/svg\+xml/);
-  assert.match(main, /watchFavicon\(\)/);
-  assert.match(main, /startThemeSync\(\)/);
+  assert.match(theme, /applyFavicon\(dark \? "dark" : "light"\)/);
   assert.match(theme, /prefers-color-scheme: dark/);
+  assert.match(main, /startTheme\(\)/);
 });

@@ -14,14 +14,12 @@ import {
   ArrowUpFromLineIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
-  CircleCheckIcon,
   ClipboardCopyIcon,
   ExternalLinkIcon,
   HistoryIcon,
   LandmarkIcon,
   LoaderCircleIcon,
   MenuIcon,
-  MonitorIcon,
   MoonIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
@@ -37,9 +35,7 @@ import {
 } from "lucide-react"
 
 import { MidasMark } from "@/components/midas-mark"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { startThemeSync, useTheme, type ThemeChoice } from "@/theme"
-import { watchFavicon } from "@/lib/favicon"
+import { startTheme, useTheme } from "@/theme"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -96,7 +92,7 @@ type CustodyBalances = { custody_wallet_address: string | null; networks: Custod
 const messages = {
   en: {
     withdrawalAvailability: "Withdrawal availability", liquidityReady: "Ready", immediateCapacity: "Immediate capacity", gasSufficiency: "Gas", gasReady: "Sufficient", gasUnknown: "Unknown", observedAt: "Observed", liquidityLoading: "Checking availability…", liquidityHint: "Shared capacity after pending withdrawals. Availability is checked again when you submit.", liquidityExceeded: "Amount exceeds immediate capacity.", not_configured: "Withdrawals are not configured yet.", rpc_unavailable: "Network data is temporarily unavailable. Try again shortly.", insufficient_gas: "Network gas is insufficient. Try another network or wait for replenishment.", insufficient_liquidity: "Token liquidity is insufficient. Try another asset or network.",
-    appName: "Midas", menu: "Menu", openNavigation: "Open navigation", collapseNavigation: "Collapse navigation", expandNavigation: "Expand navigation", skipToMainContent: "Skip to main content", home: "Home", activity: "Activity", settings: "Settings", account: "Account", administration: "Administration", custody: "Custody wallet", depositDiscovery: "Deposit discovery", userBalances: "User balances", globalLedger: "Global ledger", language: "Language", appearance: "Appearance", appearanceHint: "Light, dark, or follow the system", themeLight: "Light", themeDark: "Dark", themeSystem: "System", english: "English", chinese: "中文",
+    appName: "Midas", menu: "Menu", openNavigation: "Open navigation", collapseNavigation: "Collapse navigation", expandNavigation: "Expand navigation", skipToMainContent: "Skip to main content", home: "Home", activity: "Activity", settings: "Settings", account: "Account", administration: "Administration", custody: "Custody wallet", depositDiscovery: "Deposit discovery", userBalances: "User balances", globalLedger: "Global ledger", language: "Language", theme: "Theme", dark: "Dark", english: "English", chinese: "中文",
     balance: "Available balance", usdOnly: "USD ledger", deposit: "Deposit", transfer: "Transfer", withdraw: "Withdraw", depositAddress: "Your deposit address", depositAddressHint: "This single EVM-compatible address works on every supported network.", depositQrHint: "Scan to copy this deposit address", copy: "Copy", copied: "Address copied", noAddress: "Your dedicated EVM address is being prepared. Refresh shortly.",
     noActivity: "No activity yet", noActivityBody: "Confirmed deposits, transfers, and withdrawals appear here as immutable USD entries.", amount: "Amount", status: "Status", asset: "Asset", blockchain: "Blockchain", transaction: "Transaction", action: "Action", user: "User", operator: "Operator", time: "Time", reference: "Reference", details: "Details", viewOnExplorer: "View on explorer",
     depositTitle: "Deposit USDC or USDT", depositBody: "Send any supported USDC or USDT to your dedicated address. Midas discovers the transaction automatically, then verifies its final on-chain receipt before crediting your USD balance.", depositDiscoveryDelay: "Discovery runs in the background. A deposit normally appears within about 30 seconds at the current account size.", supportedAssets: "Supported assets", network: "Network", transactionHash: "Transaction hash", confirmDeposit: "Confirm deposit", depositNotReceived: "Deposit not received?", claimDepositTitle: "Find a deposit", claimDepositBody: "Choose the network and paste the completed transaction ID. Midas derives the token and amount from the final on-chain receipt before it credits your USD balance.", claimDepositHint: "Only the network and transaction ID are needed. A transaction can be credited only once.", claimDeposit: "Verify and credit", depositClaimed: "Deposit credited",
@@ -114,7 +110,7 @@ const messages = {
   },
   zh: {
     withdrawalAvailability: "提现可用情况", liquidityReady: "可提现", immediateCapacity: "即时可提现容量", gasSufficiency: "Gas", gasReady: "充足", gasUnknown: "未知", observedAt: "观测时间", liquidityLoading: "正在检查提现可用情况…", liquidityHint: "已扣除未完成提现的共享容量；提交时会再次校验。", liquidityExceeded: "金额超过即时可提现容量。", not_configured: "提现尚未配置完成。", rpc_unavailable: "网络数据暂不可用，请稍后重试。", insufficient_gas: "网络 Gas 不足，请切换网络或等待补充。", insufficient_liquidity: "代币流动性不足，请切换代币或网络。",
-    appName: "Midas", menu: "菜单", openNavigation: "打开导航", collapseNavigation: "收起导航", expandNavigation: "展开导航", skipToMainContent: "跳转到主要内容", home: "首页", activity: "流水", settings: "设置", account: "账户", administration: "后台管理", custody: "托管钱包", depositDiscovery: "充值发现", userBalances: "用户余额", globalLedger: "全局流水", language: "语言", appearance: "外观", appearanceHint: "浅色、深色或跟随系统", themeLight: "浅色", themeDark: "深色", themeSystem: "跟随系统", english: "English", chinese: "中文",
+    appName: "Midas", menu: "菜单", openNavigation: "打开导航", collapseNavigation: "收起导航", expandNavigation: "展开导航", skipToMainContent: "跳转到主要内容", home: "首页", activity: "流水", settings: "设置", account: "账户", administration: "后台管理", custody: "托管钱包", depositDiscovery: "充值发现", userBalances: "用户余额", globalLedger: "全局流水", language: "语言", theme: "主题", dark: "深色", english: "English", chinese: "中文",
     balance: "可用余额", usdOnly: "USD 账本", deposit: "充值", transfer: "转账", withdraw: "提现", depositAddress: "你的充值地址", depositAddressHint: "同一个 EVM 兼容地址可用于所有已支持的网络。", depositQrHint: "扫描二维码获取充值地址", copy: "复制", copied: "地址已复制", noAddress: "专属 EVM 地址正在准备，请稍后刷新。",
     noActivity: "暂无流水", noActivityBody: "确认后的充值、转账和提现会以不可变的 USD 记录显示在这里。", amount: "金额", status: "状态", asset: "资产", blockchain: "区块链", transaction: "交易", action: "动作", user: "用户", operator: "操作人", time: "时间", reference: "参考号", details: "详情", viewOnExplorer: "在区块浏览器中查看",
     depositTitle: "充值 USDC 或 USDT", depositBody: "将任一支持的 USDC 或 USDT 转入你的专属地址。Midas 会自动发现交易，并在通过最终链上回执验证后才记入 USD 余额。", depositDiscoveryDelay: "后台会自动发现充值。按当前账户数量，通常约 30 秒内显示。", supportedAssets: "支持的资产", network: "网络", transactionHash: "交易哈希", confirmDeposit: "确认充值", depositNotReceived: "充值没有到账？", claimDepositTitle: "补录充值", claimDepositBody: "选择网络并填入已经完成的交易哈希。Midas 会从最终链上回执推导代币和金额，通过验证后才计入 USD 余额。", claimDepositHint: "只需要网络和交易哈希；同一笔交易只能入账一次。", claimDeposit: "核验并入账", depositClaimed: "充值已入账",
@@ -288,28 +284,16 @@ function NavigationLink({ collapsed, compact, item, onNavigate, t }: { collapsed
 }
 
 function AppHeader({ authenticated, collapsed, pathname, t, onOpenNavigation, onToggleNavigation }: { authenticated: boolean; collapsed: boolean; pathname: string; t: Translate; onOpenNavigation: () => void; onToggleNavigation: () => void }) {
+  const { dark, toggleTheme } = useTheme()
   return <header className="sticky top-0 z-40 flex h-14 items-center border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-6">
     <div className="mx-auto flex w-full max-w-5xl items-center gap-3">
       {authenticated ? <Button aria-label={t("openNavigation")} className="lg:hidden" size="icon" title={t("openNavigation")} variant="outline" onClick={onOpenNavigation}><MenuIcon /></Button> : null}
       {authenticated ? <Button aria-label={collapsed ? t("expandNavigation") : t("collapseNavigation")} className="hidden lg:inline-flex" size="icon" title={collapsed ? t("expandNavigation") : t("collapseNavigation")} variant="outline" onClick={onToggleNavigation}>{collapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}</Button> : null}
       {authenticated ? <Separator className="h-5" orientation="vertical" /> : null}
       <div className="min-w-0 flex-1"><h1 className="truncate text-sm font-medium">{authenticated ? t(pageTitle(pathname)) : t("appName")}</h1></div>
-      <div className="flex shrink-0 items-center gap-2"><ThemeSwitcher t={t} /><LinkitMyInfo /></div>
+      <div className="flex shrink-0 items-center gap-2"><Button aria-label={t("theme")} onClick={toggleTheme} size="icon-sm" title={t("theme")} variant="ghost">{dark ? <SunIcon /> : <MoonIcon />}</Button><LinkitMyInfo /></div>
     </div>
   </header>
-}
-
-const themeChoiceOptions: readonly ThemeChoice[] = ["light", "dark", "system"]
-const themeChoiceIcons: Record<ThemeChoice, LucideIcon> = { light: SunIcon, dark: MoonIcon, system: MonitorIcon }
-
-function themeChoiceLabel(choice: ThemeChoice, t: Translate) {
-  return choice === "light" ? t("themeLight") : choice === "dark" ? t("themeDark") : t("themeSystem")
-}
-
-function ThemeSwitcher({ t }: { t: Translate }) {
-  const { choice, setChoice } = useTheme()
-  const ActiveIcon = themeChoiceIcons[choice]
-  return <DropdownMenu><DropdownMenuTrigger render={<Button aria-label={t("appearance")} size="icon" title={t("appearance")} variant="outline"><ActiveIcon /></Button>} /><DropdownMenuContent align="end" className="w-40"><DropdownMenuGroup><DropdownMenuLabel>{t("appearance")}</DropdownMenuLabel>{themeChoiceOptions.map((option) => <DropdownMenuItem className={cn(option === choice && "bg-muted text-foreground")} key={option} onClick={() => setChoice(option)}><span className="grid size-4 place-items-center">{option === choice ? <CircleCheckIcon className="size-3.5" /> : null}</span><span>{themeChoiceLabel(option, t)}</span></DropdownMenuItem>)}</DropdownMenuGroup></DropdownMenuContent></DropdownMenu>
 }
 
 function MobileNavigationBar({ t }: { t: Translate }) {
@@ -463,11 +447,9 @@ function UsdField({ t, amount, setAmount }: { t: Translate; amount: string; setA
 function SettingsPage({ t, setup, currentUserId }: { t: Translate; setup?: SetupStatus; currentUserId: string | null }) {
   const api = useApi()
   const queryClient = useQueryClient()
-  const { choice, setChoice } = useTheme()
   const initialize = useMutation({ mutationFn: () => api<SetupStatus>("/api/setup/initialize", { method: "POST", body: { root_user_id: currentUserId } }), onSuccess: () => { toast.success(t("initialized")); void queryClient.invalidateQueries({ queryKey: ["setup"] }) }, onError: (error) => showApiError(error, t) })
   return <section className="flex flex-col gap-6"><div><p className="text-sm text-muted-foreground">{t("wallet")}</p><h1 className="text-2xl font-semibold tracking-tight">{t("settings")}</h1></div>
     {!setup?.initialized ? <Card><CardHeader><CardTitle>{t("setupTitle")}</CardTitle><CardDescription>{t("setupBody")}</CardDescription></CardHeader><CardFooter><Button disabled={!currentUserId || initialize.isPending} onClick={() => initialize.mutate()}>{initialize.isPending && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />}{t("initialize")}</Button></CardFooter></Card> : null}
-    <Card><CardHeader><CardTitle>{t("appearance")}</CardTitle><CardDescription>{t("appearanceHint")}</CardDescription></CardHeader><CardContent><div className="flex flex-wrap gap-2">{themeChoiceOptions.map((option) => <Button aria-pressed={choice === option} key={option} size="sm" variant={choice === option ? "secondary" : "outline"} onClick={() => setChoice(option)}>{themeChoiceLabel(option, t)}</Button>)}</div></CardContent></Card>
   </section>
 }
 
@@ -820,6 +802,5 @@ function isMidasUserId(value: string) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0
 function transferCheckout(searchParams: URLSearchParams) { const recipientUserId = searchParams.get("recipient_user_id") ?? ""; const rawAmount = searchParams.get("amount_usd_nanos") ?? ""; if (!isMidasUserId(recipientUserId) || !/^[1-9]\d*$/.test(rawAmount)) return null; const amount = BigInt(rawAmount); return amount <= BigInt(Number.MAX_SAFE_INTEGER) ? { recipientUserId, amountUsdNanos: Number(amount) } : null }
 function subjectFromToken(token?: string) { try { const value = token?.split(".")[1]; return value ? JSON.parse(atob(value.replace(/-/g, "+").replace(/_/g, "/"))).sub as string : null } catch { return null } }
 
-startThemeSync()
-watchFavicon()
+startTheme()
 createRoot(document.getElementById("root")!).render(<AppRoot />)
