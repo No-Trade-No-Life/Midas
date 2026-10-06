@@ -1,5 +1,3 @@
-import { currentThemeChoice, resolveDark, subscribe } from "@/theme"
-
 const MIDAS_MARK_PATH = "M32 9 V55 M44 12 H28 A10 10 0 0 0 28 32 H36 A10 10 0 0 1 36 52 H20"
 
 const FAVICON_STROKE = {
@@ -8,18 +6,11 @@ const FAVICON_STROKE = {
 } as const
 
 // Browsers render the SVG favicon once and never re-evaluate its
-// prefers-color-scheme styles, so a color scheme change leaves the old color
-// in the tab until the next page load. Replacing the link with a data URL
-// carrying the scheme-colored mark keeps the icon in sync with Midas'
-// effective theme, whether that comes from the stored choice or the system.
-function applyFavicon() {
-  const dark = resolveDark(currentThemeChoice())
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path d="${MIDAS_MARK_PATH}" fill="none" stroke="${dark ? FAVICON_STROKE.dark : FAVICON_STROKE.light}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+// prefers-color-scheme styles, so a theme toggle leaves the old color in the
+// tab until the next page load. Replacing the link with a data URL carrying
+// the theme-colored mark updates the icon immediately.
+export function applyFavicon(resolvedTheme: keyof typeof FAVICON_STROKE) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path d="${MIDAS_MARK_PATH}" fill="none" stroke="${FAVICON_STROKE[resolvedTheme]}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>`
   const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]')!
   link.href = `data:image/svg+xml,${encodeURIComponent(svg)}`
-}
-
-export function watchFavicon() {
-  applyFavicon()
-  subscribe(applyFavicon)
 }

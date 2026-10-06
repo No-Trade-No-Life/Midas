@@ -10,8 +10,8 @@ Product. A person checking or moving money needs clarity and calm, not a brand s
 - **Scene:** A customer checks a stablecoin payment balance on a phone at a desk under ordinary indoor light; the surface should feel dependable, compact, and immediately legible.
 - **Anchors:** Stripe Dashboard for transactional clarity, Linear for density discipline, and shadcn Base UI for component behavior.
 - **Typography:** One familiar sans-serif system stack with a fixed product scale. No display type, gradient text, decorative illustrations, or synthetic metric cards.
-- **Layout:** The 1Exchange application shell: a collapsible, persisted navigation rail on larger screens; a sticky header with the single-line page title and the appearance control; on phones a sticky bottom tab bar plus a left navigation drawer.
-- **Theme:** Light, dark, and system appearance stored as one `midas.theme` choice; the first paint already carries it, and the mark's favicon and browser theme color follow the effective scheme.
+- **Layout:** The 1Exchange application shell: a collapsible, persisted navigation rail on larger screens; a sticky header with the single-line page title and the one-click theme toggle; on phones a sticky bottom tab bar plus a left navigation drawer.
+- **Theme:** A one-click light/dark toggle in the header, stored as `midas.theme`; a first visit follows the OS scheme, the first paint already carries the resolved theme, and the mark's favicon and browser theme color follow the effective scheme.
 
 ## Information architecture
 
