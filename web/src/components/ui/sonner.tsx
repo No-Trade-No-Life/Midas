@@ -1,13 +1,13 @@
-import { useIsDark } from "@/theme"
+import { useLinkit } from "linkit-react-components"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
 const Toaster = ({ ...props }: ToasterProps) => {
-  const dark = useIsDark()
+  const { resolvedTheme } = useLinkit()
 
   return (
     <Sonner
-      theme={dark ? "dark" : "light"}
+      theme={resolvedTheme}
       className="toaster group"
       icons={{
         success: (
