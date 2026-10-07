@@ -15,12 +15,11 @@ test('the favicon is a dollar mark with a light and dark palette', () => {
   assert.match(favicon, /@media \(prefers-color-scheme: dark\) \{\s*path \{ stroke: #fff; \}/);
 });
 
-test('the navigation rail and drawer render the dollar mark in the theme foreground color', () => {
+test('the shell renders the dollar mark in the theme foreground color', () => {
   assert.match(markComponent, /stroke="currentColor"/);
   assert.match(markComponent, /aria-hidden="true"/);
   assert.ok(markComponent.includes(dollarMark));
   assert.match(main, /<MidasMark className="size-7 shrink-0" \/>/);
-  assert.match(main, /<MidasMark className="size-9" \/>/);
   assert.ok(!main.includes('dark:invert'));
 });
 
