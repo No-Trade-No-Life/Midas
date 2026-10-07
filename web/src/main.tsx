@@ -3,9 +3,10 @@ import { createPortal } from "react-dom"
 import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider, type UseQueryResult, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { AuthMiniProvider, useAuthMini } from "auth-mini-react-components"
-import { LinkitMyInfo, LinkitProvider, LinkitUserInfo, LinkitUserPicker, useLinkit } from "linkit-react-components"
+import { LinkitProvider, LinkitUserInfo, LinkitUserPicker, useLinkit } from "linkit-react-components"
+import { AppLayout, type AppNavGroup } from "@zccz14/ux"
 import { QRCodeSVG } from "qrcode.react"
-import { HashRouter, Link, NavLink, Route, Routes, useLocation, useSearchParams } from "react-router-dom"
+import { HashRouter, Link, Route, Routes, useLocation, useSearchParams } from "react-router-dom"
 import { toast } from "sonner"
 import {
   type LucideIcon,
@@ -19,9 +20,6 @@ import {
   HistoryIcon,
   LandmarkIcon,
   LoaderCircleIcon,
-  MenuIcon,
-  PanelLeftCloseIcon,
-  PanelLeftOpenIcon,
   RefreshCwIcon,
   RotateCcwIcon,
   ScrollTextIcon,
@@ -48,7 +46,6 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Toaster } from "@/components/ui/sonner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { cn } from "@/lib/utils"
 import { withdrawalAmountFits, type WithdrawalAvailability } from "@/lib/withdrawal-availability"
 import "linkit-react-components/styles.css"
 import "./styles.css"
@@ -145,8 +142,6 @@ class ApiError extends Error {
 
 type MessageKey = keyof typeof messages.en
 
-const navigationCollapsedStorageKey = "midas.navigation.collapsed.v1"
-
 type NavigationItem = { id: string; label: MessageKey; path: string; icon: LucideIcon }
 type NavigationGroupConfig = { id: "account" | "settings" | "administration"; label: MessageKey; items: NavigationItem[] }
 
@@ -168,12 +163,6 @@ const administrationNavigationItems: NavigationItem[] = [
   { id: "fund-users", label: "fundUsers", path: "/admin/fund-users", icon: UsersRoundIcon },
   { id: "balances", label: "userBalances", path: "/admin/balances", icon: UsersRoundIcon },
   { id: "ledger", label: "globalLedger", path: "/admin/ledger", icon: ScrollTextIcon },
-]
-
-const mobileNavigationItems: NavigationItem[] = [
-  { id: "home", label: "home", path: "/", icon: WalletCardsIcon },
-  { id: "activity", label: "activity", path: "/activity", icon: HistoryIcon },
-  { id: "settings", label: "settings", path: "/settings", icon: SettingsIcon },
 ]
 
 function visibleNavigationGroups(root: boolean): NavigationGroupConfig[] {
@@ -213,27 +202,28 @@ function GlobalToaster() {
 
 function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
   const [language, setLanguage] = useState<Language>(() => window.localStorage.getItem("midas-language") === "zh" ? "zh" : "en")
-  const [navigationOpen, setNavigationOpen] = useState(false)
-  const [navigationCollapsed, setNavigationCollapsed] = useState(() => window.localStorage.getItem(navigationCollapsedStorageKey) === "true")
   const t = (key: MessageKey) => messages[language][key]
   const auth = useAuthMini()
   const location = useLocation()
   const setup = useQuery({ queryKey: ["setup"], queryFn: () => publicRequest<SetupStatus>("/api/setup/status") })
   const currentUserId = subjectFromToken(auth.session?.accessToken ?? undefined)
   const root = Boolean(setup.data?.initialized && setup.data.root_user_id === currentUserId)
-  const focusedFlow = location.pathname === "/transfer" || location.pathname === "/sign_agreement"
-  const showTabBar = auth.isAuthenticated && !focusedFlow
+  const nav: AppNavGroup[] = visibleNavigationGroups(root).map((group) => ({
+    label: t(group.label),
+    items: group.items.map((item) => ({ to: item.path, label: t(item.label), icon: <item.icon /> })),
+  }))
 
   useEffect(() => { window.localStorage.setItem("midas-language", language) }, [language])
-  useEffect(() => { window.localStorage.setItem(navigationCollapsedStorageKey, String(navigationCollapsed)) }, [navigationCollapsed])
-  useEffect(() => { setNavigationOpen(false) }, [location.pathname])
 
-  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><LinkitLanguageSync setLanguage={setLanguage} /><LinkitFaviconSync /><GlobalToaster /><div className={cn("min-h-dvh bg-muted/30", auth.isAuthenticated && "lg:grid", auth.isAuthenticated && (navigationCollapsed ? "lg:grid-cols-[3rem_minmax(0,1fr)]" : "lg:grid-cols-[16rem_minmax(0,1fr)]"))}>
-    {auth.isAuthenticated && <DesktopNavigation collapsed={navigationCollapsed} root={root} t={t} />}
-    <div className="min-w-0">
+  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><LinkitLanguageSync setLanguage={setLanguage} /><LinkitFaviconSync /><GlobalToaster />
+    <AppLayout
+      logo={{ light: <MidasMark className="size-7 shrink-0" />, dark: <MidasMark className="size-7 shrink-0" /> }}
+      title={t("appName")}
+      nav={auth.isAuthenticated ? nav : []}
+      pageTitle={t(pageTitle(location.pathname))}
+    >
     <a className="skip-link" href="#main-content">{t("skipToMainContent")}</a>
-    <AppHeader authenticated={auth.isAuthenticated} collapsed={navigationCollapsed} pathname={location.pathname} t={t} onOpenNavigation={() => setNavigationOpen(true)} onToggleNavigation={() => setNavigationCollapsed((value) => !value)} />
-    <main id="main-content" className={cn("mx-auto w-full max-w-5xl px-4 pt-6 sm:px-6 sm:pt-8", showTabBar ? "pb-24 lg:pb-8" : "pb-6 sm:pb-8")}>
+    <div id="main-content" className="mx-auto w-full max-w-5xl">
       <Routes>
         <Route path="/" element={<Dashboard t={t} language={language} />} />
         <Route path="/activity" element={<ActivityPage t={t} />} />
@@ -252,50 +242,9 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
         <Route path="/admin/ledger" element={<AdminRoute t={t} root={root}><AdminLedgerPage t={t} language={language} /></AdminRoute>} />
         <Route path="*" element={<Dashboard t={t} language={language} />} />
       </Routes>
-    </main>
-    {showTabBar ? <MobileNavigationBar t={t} /> : null}
-    {auth.isAuthenticated && <NavigationDrawer t={t} root={root} open={navigationOpen} setOpen={setNavigationOpen} />}
     </div>
-  </div></LinkitProvider>
-}
-
-function DesktopNavigation({ collapsed, root, t }: { collapsed: boolean; root: boolean; t: Translate }) {
-  return <aside className="sticky top-0 hidden h-svh min-h-0 flex-col border-r bg-background lg:flex" data-collapsed={collapsed}>
-    <div className="flex h-full min-h-0 flex-col gap-2 p-2">
-      <Link to="/" className={cn("flex min-w-0 items-center rounded-md p-2 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50", collapsed ? "justify-center" : "gap-2")}><MidasMark className="size-7 shrink-0" />{!collapsed && <strong className="min-w-0 truncate text-sm font-semibold leading-tight">{t("appName")}</strong>}</Link>
-      <Separator />
-      <nav aria-label={t("menu")} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-        {visibleNavigationGroups(root).map((group) => <NavigationGroup collapsed={collapsed} compact group={group} key={group.id} onNavigate={undefined} t={t} />)}
-      </nav>
-    </div>
-  </aside>
-}
-
-function NavigationGroup({ collapsed, compact, group, onNavigate, t }: { collapsed: boolean; compact: boolean; group: NavigationGroupConfig; onNavigate: (() => void) | undefined; t: Translate }) {
-  return <section className="flex flex-col gap-0.5">{!collapsed ? <p className="flex h-8 items-center px-2 text-xs font-medium text-muted-foreground">{t(group.label)}</p> : null}{group.items.map((item) => <NavigationLink collapsed={collapsed} compact={compact} item={item} key={item.id} onNavigate={onNavigate} t={t} />)}</section>
-}
-
-function NavigationLink({ collapsed, compact, item, onNavigate, t }: { collapsed: boolean; compact: boolean; item: NavigationItem; onNavigate: (() => void) | undefined; t: Translate }) {
-  const Icon = item.icon
-  return <NavLink aria-label={collapsed ? t(item.label) : undefined} title={collapsed ? t(item.label) : undefined} className={({ isActive }) => cn("flex w-full items-center gap-2 rounded-md px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50", compact ? "h-8" : "min-h-11", collapsed && "size-8 justify-center px-0", isActive && "bg-muted text-foreground")} to={item.path} onClick={onNavigate}><Icon className="size-4 shrink-0" />{!collapsed ? <span className="min-w-0 truncate">{t(item.label)}</span> : null}</NavLink>
-}
-
-function AppHeader({ authenticated, collapsed, pathname, t, onOpenNavigation, onToggleNavigation }: { authenticated: boolean; collapsed: boolean; pathname: string; t: Translate; onOpenNavigation: () => void; onToggleNavigation: () => void }) {
-  return <header className="sticky top-0 z-40 flex h-14 items-center border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-6">
-    <div className="mx-auto flex w-full max-w-5xl items-center gap-3">
-      {authenticated ? <Button aria-label={t("openNavigation")} className="lg:hidden" size="icon" title={t("openNavigation")} variant="outline" onClick={onOpenNavigation}><MenuIcon /></Button> : null}
-      {authenticated ? <Button aria-label={collapsed ? t("expandNavigation") : t("collapseNavigation")} className="hidden lg:inline-flex" size="icon" title={collapsed ? t("expandNavigation") : t("collapseNavigation")} variant="outline" onClick={onToggleNavigation}>{collapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}</Button> : null}
-      {authenticated ? <Separator className="h-5" orientation="vertical" /> : null}
-      <div className="min-w-0 flex-1"><h1 className="truncate text-sm font-medium">{authenticated ? t(pageTitle(pathname)) : t("appName")}</h1></div>
-      <div className="flex shrink-0 items-center gap-2"><LinkitMyInfo /></div>
-    </div>
-  </header>
-}
-
-function MobileNavigationBar({ t }: { t: Translate }) {
-  return <nav aria-label={t("menu")} className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur supports-[backdrop-filter]:bg-background/80 lg:hidden">
-    <div className="mx-auto grid w-full max-w-5xl grid-cols-3">{mobileNavigationItems.map((item) => { const Icon = item.icon; return <NavLink className={({ isActive }) => cn("flex min-h-14 flex-col items-center justify-center gap-0.5 text-xs text-muted-foreground", isActive && "font-medium text-foreground")} key={item.id} to={item.path}><Icon className="size-5" /><span>{t(item.label)}</span></NavLink> })}</div>
-  </nav>
+    </AppLayout>
+  </LinkitProvider>
 }
 
 function Dashboard({ t, language }: { t: Translate; language: Language }) {
@@ -744,10 +693,6 @@ function AddressBookRow({ entry, t }: { entry: AddressBookEntry; t: Translate })
   const rename = useMutation({ mutationFn: () => api<AddressBookEntry>(`/api/address-book/me/${entry.id}`, { method: "PUT", body: { label } }), onSuccess: () => { setEditing(false); void queryClient.invalidateQueries({ queryKey: ["address-book"] }) }, onError: (error) => showApiError(error, t) })
   const remove = useMutation({ mutationFn: () => api<void>(`/api/address-book/me/${entry.id}`, { method: "DELETE" }), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["address-book"] }), onError: (error) => showApiError(error, t) })
   return <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2">{editing ? <form onSubmit={(event) => { event.preventDefault(); rename.mutate() }}><FieldGroup className="flex-row items-center gap-2"><Field><FieldLabel className="sr-only" htmlFor={`address-book-label-${entry.id}`}>{t("addressLabel")}</FieldLabel><Input id={`address-book-label-${entry.id}`} value={label} onChange={(event) => setLabel(event.target.value)} maxLength={80} /></Field><Button size="sm" type="submit" disabled={rename.isPending || !label.trim()}>{t("saveAddress")}</Button><Button size="sm" type="button" variant="ghost" onClick={() => { setLabel(entry.label); setEditing(false) }}>{t("cancel")}</Button></FieldGroup></form> : <><span className="font-medium">{entry.label}</span><Badge variant="outline">{entry.chain_name}</Badge></>}</div><code className="block max-w-72 truncate text-xs text-muted-foreground">{entry.address}</code></div>{!editing ? <div className="flex items-center gap-1"><Button size="sm" variant="ghost" onClick={() => setEditing(true)}>{t("renameAddress")}</Button><Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate()}>{t("removeAddress")}</Button></div> : null}</div>
-}
-
-function NavigationDrawer({ t, root, open, setOpen }: { t: Translate; root: boolean; open: boolean; setOpen: (open: boolean) => void }) {
-  return <Drawer open={open} onOpenChange={setOpen} swipeDirection="left"><DrawerContent><DrawerHeader><DrawerTitle className="flex items-center gap-3"><MidasMark className="size-9" />{t("appName")}</DrawerTitle><DrawerDescription className="sr-only">{t("usdOnly")}</DrawerDescription></DrawerHeader><nav aria-label={t("menu")} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-4">{visibleNavigationGroups(root).map((group) => <NavigationGroup collapsed={false} compact={false} group={group} key={group.id} onNavigate={() => setOpen(false)} t={t} />)}</nav></DrawerContent></Drawer>
 }
 
 function AdminRoute({ root, t, children }: { root: boolean; t: Translate; children: React.ReactNode }) {
