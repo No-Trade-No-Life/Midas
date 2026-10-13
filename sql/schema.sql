@@ -111,6 +111,11 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   asset_id TEXT REFERENCES supported_assets(id),
   amount_usd_nanos INTEGER NOT NULL,
   balance_delta_usd_nanos INTEGER NOT NULL,
+  -- Running per-user balance chain: the cumulative balance before and after
+  -- this entry's delta. Balance reads follow the latest entry's post value
+  -- instead of summing the user's whole history.
+  pre_balance_usd_nanos INTEGER,
+  post_balance_usd_nanos INTEGER,
   counterparty_user_id TEXT REFERENCES users(id),
   external_reference TEXT UNIQUE,
   note TEXT,
@@ -121,6 +126,13 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 
 CREATE INDEX IF NOT EXISTS ledger_entries_user_created_idx
   ON ledger_entries(user_id, created_at DESC, id DESC);
+-- Keeps the per-user balance tail lookup cheap as history grows.
+CREATE INDEX IF NOT EXISTS ledger_entries_user_idx
+  ON ledger_entries(user_id);
+-- Keeps the released-reservation correction (rejected or disabled entries)
+-- cheap without scanning a user's whole history.
+CREATE INDEX IF NOT EXISTS ledger_entries_released_idx
+  ON ledger_entries(user_id) WHERE status IN ('rejected', 'disabled');
 
 CREATE TABLE IF NOT EXISTS payment_operations (
   id TEXT PRIMARY KEY,
@@ -229,6 +241,17 @@ CREATE TABLE IF NOT EXISTS payment_agreement_bindings (
 
 -- Every charge is pinned to the two immutable ledger rows it creates. The
 -- agreement-scoped idempotency key makes retrying an external charge safe.
+-- An atomic charge batch: one agreement-scoped idempotency key covers every
+-- item, and a single transaction posts all payer/owner ledger pairs so
+-- high-frequency usage settles with one commit.
+CREATE TABLE IF NOT EXISTS payment_agreement_charge_batches (
+  id TEXT PRIMARY KEY,
+  agreement_id TEXT NOT NULL REFERENCES payment_agreements(id),
+  idempotency_key TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(agreement_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS payment_agreement_charges (
   id TEXT PRIMARY KEY,
   agreement_id TEXT NOT NULL REFERENCES payment_agreements(id),
@@ -237,9 +260,15 @@ CREATE TABLE IF NOT EXISTS payment_agreement_charges (
   payer_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
   owner_ledger_entry_id TEXT NOT NULL UNIQUE REFERENCES ledger_entries(id),
   idempotency_key TEXT NOT NULL,
+  batch_id TEXT REFERENCES payment_agreement_charge_batches(id),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(agreement_id, idempotency_key)
 );
+
+CREATE INDEX IF NOT EXISTS payment_agreement_charge_batches_agreement_created_idx
+  ON payment_agreement_charge_batches(agreement_id, created_at DESC, id DESC);
+-- The batch column index is created by the running-balance migration so that
+-- legacy databases get the column before the index.
 
 -- Payouts mirror charges in the reverse direction. They are intentionally
 -- ledger-only: an integration can return a customer's Midas USD balance but

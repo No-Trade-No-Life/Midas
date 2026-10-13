@@ -5,7 +5,7 @@
 ## What Midas includes
 
 - Rust/Axum API with SQLite **WAL** persistence.
-- Exact USD nanodollar ledger (`amount_usd_nanos` / `balance_delta_usd_nanos`) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD nanodollars.
+- Exact USD nanodollar ledger (`amount_usd_nanos` / `balance_delta_usd_nanos`, plus a running `pre_balance_usd_nanos` / `post_balance_usd_nanos` chain on every entry so balance reads stay O(1) as history grows) for USDC and USDT on Ethereum, BNB Smart Chain, Base, Arbitrum One, OP Mainnet, and Polygon. The fixed contract map supports both six- and eighteen-decimal tokens while recording only USD nanodollars.
 - One persisted dedicated EVM-compatible deposit key/address per human user, automatically created after initialization; private material is never returned from an API.
 - Balance-driven deposit discovery: every 30 seconds Midas reads each human deposit address's USDC/USDT balances on every enabled chain in a single Multicall3 batch and reconciles them against the credited, not-yet-swept ledger. A balance change or reconciliation gap triggers a bounded recent `Transfer`-log scan (5,000 blocks initially, escalating only while a gap stays unresolved) that resolves the transaction hash; every candidate is verified from its ERC-20 receipt through the chain RPC before crediting, and submitted sweeps are finalized from their receipts so reconciliation stays exact. Customers can also submit a network and TxID to verify and claim a missed deposit; the token and amount are always derived from the receipt.
 - Atomic internal transfers that automatically provision a new human recipient's Midas account and dedicated wallet, withdrawal balance reservations, collection-wallet withdrawal broadcasts, and exact-receipt finalization. Withdrawals that still owe a signing attempt or a receipt are re-queued when the service starts, and signed withdrawals are always re-broadcast from their exact saved transaction.
@@ -17,7 +17,7 @@
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, direct signed USD balance adjustments, and filterable, paginated global ledger review.
 - Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has no EVM wallet or blockchain API surface: its transferable Midas user ID, balance, immutable history, and one-time API key are for internal transfers only. Its API key can also read the exact cumulative transfers received from a specified Midas user, so an application can treat its fund user as a public recharge account without asking users to authorize automatic charges.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
-- Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page. Its API key can then make idempotent USD charges and ledger-only payouts against authorized users. A payout returns USD from the channel owner to the user and never requests an on-chain withdrawal.
+- Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page. Its API key can then make idempotent USD charges and ledger-only payouts against authorized users. A payout returns USD from the channel owner to the user and never requests an on-chain withdrawal. Charges can also arrive as one atomic, idempotent batch (up to 500 items) that settles with a single database commit, so usage metering can aggregate instead of paying a commit per call.
 - OpenAPI contract and CI foundation.
 
 ## Architecture
@@ -37,7 +37,7 @@ Axum API
 
 Midas records **USD only** in integer nanodollars. Future USDC/USDT chain metadata is retained alongside ledger entries, but no token amount is treated as the system-of-record balance.
 
-Existing SQLite databases migrate on the first startup that carries this version. The USD-unit migration atomically renames every persisted `*_usd_micros` column, multiplies its historical values by 1,000, verifies that no value can overflow `i64`, and records the `nanodollars` unit marker so it cannot run twice. The startup migration also removes any legacy fund-user deposit private keys, discovery cursors, and balance snapshots.
+Existing SQLite databases migrate on the first startup that carries this version. The USD-unit migration atomically renames every persisted `*_usd_micros` column, multiplies its historical values by 1,000, verifies that no value can overflow `i64`, and records the `nanodollars` unit marker so it cannot run twice. The startup migration also removes any legacy fund-user deposit private keys, discovery cursors, and balance snapshots, and backfills `pre_balance_usd_nanos` / `post_balance_usd_nanos` for every existing ledger entry in one transaction.
 
 | Table | Purpose |
 | --- | --- |
@@ -49,7 +49,7 @@ Existing SQLite databases migrate on the first startup that carries this version
 | `wallet_addresses` | One human-user EVM-compatible deposit address (legacy chain field is an internal sentinel) |
 | `wallet_private_keys` | Dedicated human-user EVM deposit private keys; readable only by the service account |
 | `wallet_asset_snapshots` | Latest USDC/USDT balance snapshot, locate state, and scan escalation per human deposit address, chain, and asset |
-| `ledger_entries` | Immutable USD balance deltas and payment history |
+| `ledger_entries` | Immutable USD balance deltas and payment history, each pinned to the account's running pre/post balance |
 | `payment_operations` | Per-user idempotency keys for payment writes |
 | `deposits`, `deposit_sweeps` | Confirmed deposits and the two-step collection state |
 | `address_book_entries` | Legacy per-user, per-chain approved withdrawal destinations |
@@ -59,6 +59,7 @@ Existing SQLite databases migrate on the first startup that carries this version
 | `payment_agreements` | Owner-created payment channels with only a one-way API-key hash and non-secret prefix |
 | `payment_agreement_bindings` | Explicit user authorization for automatic-payment channels |
 | `payment_agreement_charges`, `payment_agreement_payouts` | Agreement-scoped idempotent charges and ledger-only payouts with their paired ledger entries |
+| `payment_agreement_charge_batches` | Atomic idempotent charge batches; their charges reference the batch for exact replay |
 
 ## Local development
 
@@ -97,6 +98,7 @@ GET /api/agreements/bindings/me
 GET /api/agreements/{id}
 POST/DELETE /api/agreements/{id}/bind
 POST /api/agreements/{id}/api-key
+POST /api/agreements/{id}/charge-batches
 ```
 
 A root operator creates and rotates fund users through `POST /api/admin/fund-users`
