@@ -1,7 +1,7 @@
 mod liquidity;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
     str::FromStr,
@@ -343,6 +343,8 @@ struct LedgerEntry {
     status: String,
     amount_usd_nanos: i64,
     balance_delta_usd_nanos: i64,
+    pre_balance_usd_nanos: Option<i64>,
+    post_balance_usd_nanos: Option<i64>,
     created_at: String,
     posted_at: Option<String>,
     asset_symbol: Option<String>,
@@ -583,6 +585,8 @@ struct AdminLedgerEntry {
     status: String,
     amount_usd_nanos: i64,
     balance_delta_usd_nanos: i64,
+    pre_balance_usd_nanos: Option<i64>,
+    post_balance_usd_nanos: Option<i64>,
     created_at: String,
     posted_at: Option<String>,
     asset_symbol: Option<String>,
@@ -814,6 +818,19 @@ struct PaymentAgreementCharge {
     created_at: String,
 }
 
+#[derive(Deserialize)]
+struct PaymentAgreementChargeBatchInput {
+    items: Vec<PaymentAgreementChargeInput>,
+}
+
+#[derive(Serialize, Debug)]
+struct PaymentAgreementChargeBatch {
+    id: String,
+    agreement_id: String,
+    created_at: String,
+    charges: Vec<PaymentAgreementCharge>,
+}
+
 #[derive(Serialize, Debug)]
 struct PaymentAgreementPayout {
     id: String,
@@ -988,6 +1005,10 @@ fn app(state: AppState) -> Router {
             post(payment_agreement_charge_summary),
         )
         .route("/agreements/:id/charges", post(charge_payment_agreement))
+        .route(
+            "/agreements/:id/charge-batches",
+            post(charge_payment_agreement_batch),
+        )
         .route("/agreements/:id/payouts", post(payout_payment_agreement))
         .route(
             "/admin/evm-config",
@@ -1232,7 +1253,7 @@ async fn load_inbound_transfer_summaries(
 }
 
 async fn load_user_ledger(db: &SqlitePool, user_id: &str) -> Result<Vec<LedgerEntry>, ApiError> {
-    let rows = sqlx::query("SELECT e.id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash) FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE e.user_id=?1 ORDER BY e.created_at DESC,e.id DESC LIMIT 100")
+    let rows = sqlx::query("SELECT e.id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash),e.pre_balance_usd_nanos,e.post_balance_usd_nanos FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id WHERE e.user_id=?1 ORDER BY e.created_at DESC,e.id DESC LIMIT 100")
         .bind(user_id)
         .fetch_all(db)
         .await
@@ -1255,6 +1276,8 @@ fn ledger_entry(row: sqlx::sqlite::SqliteRow) -> LedgerEntry {
         chain_id: row.get(10),
         network_name: row.get(11),
         transaction_hash: row.get(12),
+        pre_balance_usd_nanos: row.get(13),
+        post_balance_usd_nanos: row.get(14),
     }
 }
 
@@ -2507,6 +2530,65 @@ async fn charge_payment_agreement(
     ))
 }
 
+/// One atomic batch of automatic charges. The batch's single
+/// `Idempotency-Key` covers every item: retrying the same key returns the
+/// exact same charges, and a failure changes nothing.
+const MAX_PAYMENT_AGREEMENT_CHARGE_BATCH_ITEMS: usize = 500;
+
+#[derive(Debug)]
+struct NormalizedPaymentAgreementCharge {
+    user_id: String,
+    amount_usd_nanos: i64,
+    reference: Option<String>,
+}
+
+fn normalize_payment_agreement_charge_batch(
+    input: &PaymentAgreementChargeBatchInput,
+) -> Result<Vec<NormalizedPaymentAgreementCharge>, ApiError> {
+    if input.items.is_empty() || input.items.len() > MAX_PAYMENT_AGREEMENT_CHARGE_BATCH_ITEMS {
+        return Err(ApiError::invalid(format!(
+            "a charge batch must contain 1 to {MAX_PAYMENT_AGREEMENT_CHARGE_BATCH_ITEMS} items"
+        )));
+    }
+    input
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            if item.amount_usd_nanos <= 0 {
+                return Err(ApiError::invalid(format!(
+                    "items[{index}].amount_usd_nanos must be greater than zero"
+                )));
+            }
+            Uuid::parse_str(&item.user_id).map_err(|_| {
+                ApiError::invalid(format!("items[{index}].user_id must be an Auth Mini UUID"))
+            })?;
+            Ok(NormalizedPaymentAgreementCharge {
+                user_id: item.user_id.clone(),
+                amount_usd_nanos: item.amount_usd_nanos,
+                reference: payment_agreement_reference(item.reference.as_deref())?,
+            })
+        })
+        .collect()
+}
+
+async fn charge_payment_agreement_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<PaymentAgreementChargeBatchInput>,
+) -> Result<Json<PaymentAgreementChargeBatch>, ApiError> {
+    let api_key = payment_agreement_api_key(&headers)?;
+    let idempotency_key = idempotency_key(&headers)?;
+    let items = normalize_payment_agreement_charge_batch(&input)?;
+    let agreement = read_payment_agreement_for_api_key(&state.db, &id, api_key).await?;
+    let _write = state.write_lock.lock().await;
+    Ok(Json(
+        post_payment_agreement_charge_batch(&state.db, &agreement, &items, &idempotency_key)
+            .await?,
+    ))
+}
+
 async fn payout_payment_agreement(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2645,6 +2727,187 @@ async fn post_payment_agreement_charge(
         .map_err(db_error)?;
     tx.commit().await.map_err(db_error)?;
     read_payment_agreement_charge(db, &charge_id).await
+}
+
+async fn post_payment_agreement_charge_batch(
+    db: &SqlitePool,
+    agreement: &PaymentAgreement,
+    items: &[NormalizedPaymentAgreementCharge],
+    idempotency_key: &str,
+) -> Result<PaymentAgreementChargeBatch, ApiError> {
+    if let Some(existing) = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM payment_agreement_charge_batches WHERE agreement_id=?1 AND idempotency_key=?2",
+    )
+    .bind(&agreement.id)
+    .bind(idempotency_key)
+    .fetch_optional(db)
+    .await
+    .map_err(db_error)?
+    {
+        return read_payment_agreement_charge_batch(db, &existing).await;
+    }
+    let bound_users: HashSet<String> =
+        sqlx::query_scalar("SELECT user_id FROM payment_agreement_bindings WHERE agreement_id=?1")
+            .bind(&agreement.id)
+            .fetch_all(db)
+            .await
+            .map_err(db_error)?
+            .into_iter()
+            .collect();
+    let mut batch_totals: BTreeMap<&str, i64> = BTreeMap::new();
+    for item in items {
+        if !bound_users.contains(&item.user_id) {
+            return Err(ApiError::conflict(format!(
+                "user {} has not authorized the automatic payment channel",
+                item.user_id
+            )));
+        }
+        let total = batch_totals.entry(item.user_id.as_str()).or_default();
+        *total = total.checked_add(item.amount_usd_nanos).ok_or_else(|| {
+            ApiError::invalid("the total charge for one user exceeds the supported range")
+        })?;
+    }
+    for (user_id, total) in &batch_totals {
+        if available_balance(db, user_id).await? < *total {
+            return Err(ApiError::conflict(format!(
+                "user {user_id} has insufficient available USD balance for this batch"
+            )));
+        }
+    }
+    let batch_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let mut tx = db.begin().await.map_err(db_error)?;
+    sqlx::query("INSERT INTO payment_agreement_charge_batches(id,agreement_id,idempotency_key,created_at) VALUES(?1,?2,?3,?4)")
+        .bind(&batch_id)
+        .bind(&agreement.id)
+        .bind(idempotency_key)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    let mut charges = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let charge_id = Uuid::new_v4().to_string();
+        let payer_ledger_id = Uuid::new_v4().to_string();
+        let owner_ledger_id = Uuid::new_v4().to_string();
+        let note = payment_agreement_ledger_note(
+            "Automatic charge",
+            &agreement.name,
+            item.reference.as_deref(),
+        );
+        let payer_reference = format!("agreement:{charge_id}:out");
+        let owner_reference = format!("agreement:{charge_id}:in");
+        insert_ledger(
+            &mut tx,
+            LedgerInsert {
+                id: &payer_ledger_id,
+                user_id: &item.user_id,
+                kind: "transfer_out",
+                status: "posted",
+                asset_id: None,
+                amount_usd_nanos: item.amount_usd_nanos,
+                balance_delta_usd_nanos: -item.amount_usd_nanos,
+                counterparty_user_id: Some(&agreement.owner_user_id),
+                external_reference: Some(&payer_reference),
+                note: Some(&note),
+                now: &now,
+            },
+        )
+        .await?;
+        insert_ledger(
+            &mut tx,
+            LedgerInsert {
+                id: &owner_ledger_id,
+                user_id: &agreement.owner_user_id,
+                kind: "transfer_in",
+                status: "posted",
+                asset_id: None,
+                amount_usd_nanos: item.amount_usd_nanos,
+                balance_delta_usd_nanos: item.amount_usd_nanos,
+                counterparty_user_id: Some(&item.user_id),
+                external_reference: Some(&owner_reference),
+                note: Some(&note),
+                now: &now,
+            },
+        )
+        .await?;
+        sqlx::query("INSERT INTO payment_agreement_charges(id,agreement_id,payer_user_id,amount_usd_nanos,payer_ledger_entry_id,owner_ledger_entry_id,idempotency_key,batch_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)")
+            .bind(&charge_id)
+            .bind(&agreement.id)
+            .bind(&item.user_id)
+            .bind(item.amount_usd_nanos)
+            .bind(&payer_ledger_id)
+            .bind(&owner_ledger_id)
+            .bind(format!("{idempotency_key}:{index}"))
+            .bind(&batch_id)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+        charges.push(PaymentAgreementCharge {
+            id: charge_id,
+            agreement_id: agreement.id.clone(),
+            payer_user_id: item.user_id.clone(),
+            owner_user_id: agreement.owner_user_id.clone(),
+            amount_usd_nanos: item.amount_usd_nanos,
+            amount_usd: format_usd(item.amount_usd_nanos),
+            created_at: now.clone(),
+        });
+    }
+    tx.commit().await.map_err(db_error)?;
+    Ok(PaymentAgreementChargeBatch {
+        id: batch_id,
+        agreement_id: agreement.id.clone(),
+        created_at: now,
+        charges,
+    })
+}
+
+async fn read_payment_agreement_charge_batch(
+    db: &SqlitePool,
+    id: &str,
+) -> Result<PaymentAgreementChargeBatch, ApiError> {
+    let row = sqlx::query("SELECT b.id,b.agreement_id,b.created_at,a.owner_user_id FROM payment_agreement_charge_batches b JOIN payment_agreements a ON a.id=b.agreement_id WHERE b.id=?1")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "automatic charge batch was not recorded",
+            )
+        })?;
+    let batch_id: String = row.get(0);
+    let agreement_id: String = row.get(1);
+    let created_at: String = row.get(2);
+    let owner_user_id: String = row.get(3);
+    let rows = sqlx::query("SELECT id,payer_user_id,amount_usd_nanos,created_at FROM payment_agreement_charges WHERE batch_id=?1 ORDER BY rowid")
+        .bind(id)
+        .fetch_all(db)
+        .await
+        .map_err(db_error)?;
+    let charges = rows
+        .into_iter()
+        .map(|row| {
+            let amount_usd_nanos: i64 = row.get(2);
+            PaymentAgreementCharge {
+                id: row.get(0),
+                agreement_id: agreement_id.clone(),
+                payer_user_id: row.get(1),
+                owner_user_id: owner_user_id.clone(),
+                amount_usd_nanos,
+                amount_usd: format_usd(amount_usd_nanos),
+                created_at: row.get(3),
+            }
+        })
+        .collect();
+    Ok(PaymentAgreementChargeBatch {
+        id: batch_id,
+        agreement_id,
+        created_at,
+        charges,
+    })
 }
 
 async fn post_payment_agreement_payout(
@@ -3734,33 +3997,43 @@ async fn fund_user_ledger(
 }
 
 async fn load_fund_users(db: &SqlitePool) -> Result<Vec<FundUser>, ApiError> {
-    let rows = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id LEFT JOIN ledger_entries e ON e.user_id=u.id WHERE u.kind='fund' AND u.status='active' GROUP BY u.id,u.name,k.api_key_prefix,u.created_at ORDER BY u.created_at DESC,u.id DESC")
+    let rows = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,u.created_at FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id WHERE u.kind='fund' AND u.status='active' ORDER BY u.created_at DESC,u.id DESC")
         .fetch_all(db)
         .await
         .map_err(db_error)?;
-    Ok(rows.into_iter().map(fund_user).collect())
+    let mut users = Vec::with_capacity(rows.len());
+    for row in rows {
+        let user_id: String = row.get(0);
+        let available_usd_nanos = available_balance(db, &user_id).await?;
+        users.push(FundUser {
+            id: user_id,
+            name: row.get(1),
+            api_key_prefix: row.get(2),
+            created_at: row.get(3),
+            available_usd_nanos,
+            available_usd: format_usd(available_usd_nanos),
+        });
+    }
+    Ok(users)
 }
 
 async fn read_fund_user(db: &SqlitePool, user_id: &str) -> Result<FundUser, ApiError> {
-    let row = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id LEFT JOIN ledger_entries e ON e.user_id=u.id WHERE u.id=?1 AND u.kind='fund' AND u.status='active' GROUP BY u.id,u.name,k.api_key_prefix,u.created_at")
+    let row = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,u.created_at FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id WHERE u.id=?1 AND u.kind='fund' AND u.status='active'")
         .bind(user_id)
         .fetch_optional(db)
         .await
         .map_err(db_error)?
         .ok_or_else(|| ApiError::invalid("fund user does not exist"))?;
-    Ok(fund_user(row))
-}
-
-fn fund_user(row: sqlx::sqlite::SqliteRow) -> FundUser {
-    let available_usd_nanos: i64 = row.get(4);
-    FundUser {
-        id: row.get(0),
+    let id: String = row.get(0);
+    let available_usd_nanos = available_balance(db, &id).await?;
+    Ok(FundUser {
+        id,
         name: row.get(1),
         api_key_prefix: row.get(2),
         created_at: row.get(3),
         available_usd_nanos,
         available_usd: format_usd(available_usd_nanos),
-    }
+    })
 }
 
 async fn list_admin_balances(
@@ -3772,30 +4045,36 @@ async fn list_admin_balances(
 }
 
 async fn load_admin_balances(db: &SqlitePool) -> Result<AdminBalancesResponse, ApiError> {
-    let summary = sqlx::query("SELECT COUNT(*),COALESCE(SUM(CASE WHEN available_usd_nanos>0 THEN 1 ELSE 0 END),0),COALESCE(SUM(available_usd_nanos),0) FROM (SELECT u.id,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) AS available_usd_nanos FROM users u LEFT JOIN ledger_entries e ON e.user_id=u.id GROUP BY u.id)")
-        .fetch_one(db)
-        .await
-        .map_err(db_error)?;
-    let total_available_usd_nanos: i64 = summary.get(2);
-    let users = sqlx::query("SELECT u.id,u.created_at,COALESCE(SUM(CASE WHEN e.status IN ('posted','pending') THEN e.balance_delta_usd_nanos ELSE 0 END),0) FROM users u LEFT JOIN ledger_entries e ON e.user_id=u.id GROUP BY u.id,u.created_at ORDER BY 3 DESC,u.created_at DESC,u.id DESC")
+    let rows = sqlx::query("SELECT id,created_at FROM users ORDER BY created_at DESC,id DESC")
         .fetch_all(db)
         .await
-        .map_err(db_error)?
-        .into_iter()
-        .map(|row| {
-            let available_usd_nanos: i64 = row.get(2);
-            AdminUserBalance {
-                user_id: row.get(0),
-                created_at: row.get(1),
-                available_usd_nanos,
-                available_usd: format_usd(available_usd_nanos),
-            }
-        })
-        .collect();
+        .map_err(db_error)?;
+    let mut users = Vec::with_capacity(rows.len());
+    for row in rows {
+        let user_id: String = row.get(0);
+        let available_usd_nanos = available_balance(db, &user_id).await?;
+        users.push(AdminUserBalance {
+            user_id,
+            created_at: row.get(1),
+            available_usd_nanos,
+            available_usd: format_usd(available_usd_nanos),
+        });
+    }
+    users.sort_by(|a, b| {
+        b.available_usd_nanos
+            .cmp(&a.available_usd_nanos)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| b.user_id.cmp(&a.user_id))
+    });
+    let funded_user_count = users
+        .iter()
+        .filter(|user| user.available_usd_nanos > 0)
+        .count() as i64;
+    let total_available_usd_nanos: i64 = users.iter().map(|user| user.available_usd_nanos).sum();
     Ok(AdminBalancesResponse {
         summary: AdminBalanceSummary {
-            user_count: summary.get(0),
-            funded_user_count: summary.get(1),
+            user_count: users.len() as i64,
+            funded_user_count,
             total_available_usd_nanos,
             total_available_usd: format_usd(total_available_usd_nanos),
         },
@@ -3878,7 +4157,7 @@ async fn post_admin_adjustment(
 }
 
 async fn read_admin_ledger_entry(db: &SqlitePool, id: &str) -> Result<AdminLedgerEntry, ApiError> {
-    sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash),x.operator_user_id FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id LEFT JOIN adjustments x ON x.ledger_entry_id=e.id WHERE e.id=?1")
+    sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash),x.operator_user_id,e.pre_balance_usd_nanos,e.post_balance_usd_nanos FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id LEFT JOIN adjustments x ON x.ledger_entry_id=e.id WHERE e.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
@@ -3898,6 +4177,8 @@ fn admin_ledger_entry(row: sqlx::sqlite::SqliteRow) -> AdminLedgerEntry {
         user_id: row.get(1),
         counterparty_user_id: row.get(2),
         operator_user_id: row.get(15),
+        pre_balance_usd_nanos: row.get(16),
+        post_balance_usd_nanos: row.get(17),
         kind: row.get(3),
         status: row.get(4),
         amount_usd_nanos: row.get(5),
@@ -3996,7 +4277,7 @@ async fn load_admin_ledger(
         .fetch_one(db)
         .await
         .map_err(db_error)?;
-    let rows = sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash),x.operator_user_id FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id LEFT JOIN adjustments x ON x.ledger_entry_id=e.id WHERE (?1 IS NULL OR e.kind=?1) AND (?2 IS NULL OR e.status=?2) AND (?3 IS NULL OR e.user_id=?3) ORDER BY e.created_at DESC,e.id DESC LIMIT ?4 OFFSET ?5")
+    let rows = sqlx::query("SELECT e.id,e.user_id,e.counterparty_user_id,e.kind,e.status,e.amount_usd_nanos,e.balance_delta_usd_nanos,e.created_at,e.posted_at,e.external_reference,e.note,a.symbol,a.chain_id,n.name,COALESCE(d.transaction_hash,w.transaction_hash),x.operator_user_id,e.pre_balance_usd_nanos,e.post_balance_usd_nanos FROM ledger_entries e LEFT JOIN supported_assets a ON a.id=e.asset_id LEFT JOIN evm_networks n ON n.chain_id=a.chain_id LEFT JOIN deposits d ON d.ledger_entry_id=e.id LEFT JOIN withdrawals w ON w.ledger_entry_id=e.id LEFT JOIN adjustments x ON x.ledger_entry_id=e.id WHERE (?1 IS NULL OR e.kind=?1) AND (?2 IS NULL OR e.status=?2) AND (?3 IS NULL OR e.user_id=?3) ORDER BY e.created_at DESC,e.id DESC LIMIT ?4 OFFSET ?5")
         .bind(kind)
         .bind(status)
         .bind(user_id)
@@ -5086,8 +5367,29 @@ fn address_book_entry(row: sqlx::sqlite::SqliteRow) -> Result<AddressBookEntry, 
     })
 }
 
+/// The user's running ledger chain: the grand total of every balance delta
+/// ever inserted for the user, read from the latest entry's post balance.
+/// Only a tail that predates the running-balance columns (legacy or manually
+/// inserted rows) falls back to a full-history sum.
+const LEDGER_CHAIN_BALANCE_SQL: &str = "SELECT COALESCE((SELECT post_balance_usd_nanos FROM ledger_entries WHERE user_id=?1 ORDER BY rowid DESC LIMIT 1),(SELECT COALESCE(SUM(balance_delta_usd_nanos),0) FROM ledger_entries WHERE user_id=?1))";
+
+async fn ledger_chain_balance(
+    db: &mut sqlx::SqliteConnection,
+    user_id: &str,
+) -> Result<i64, ApiError> {
+    sqlx::query_scalar(LEDGER_CHAIN_BALANCE_SQL)
+        .bind(user_id)
+        .fetch_one(&mut *db)
+        .await
+        .map_err(db_error)
+}
+
 async fn available_balance(db: &SqlitePool, user_id: &str) -> Result<i64, ApiError> {
-    sqlx::query_scalar("SELECT COALESCE(SUM(balance_delta_usd_nanos),0) FROM ledger_entries WHERE user_id=?1 AND status IN ('posted','pending')")
+    // The chain tail already counts every inserted delta, including reserved
+    // withdrawals; entries that were later released (rejected or disabled)
+    // subtract themselves back out without rewriting the chain. Both lookups
+    // are index searches, so the balance no longer scales with history.
+    sqlx::query_scalar("SELECT COALESCE((SELECT post_balance_usd_nanos FROM ledger_entries WHERE user_id=?1 ORDER BY rowid DESC LIMIT 1),(SELECT COALESCE(SUM(balance_delta_usd_nanos),0) FROM ledger_entries WHERE user_id=?1)) - COALESCE((SELECT SUM(balance_delta_usd_nanos) FROM ledger_entries WHERE user_id=?1 AND status IN ('rejected','disabled')),0)")
         .bind(user_id)
         .fetch_one(db)
         .await
@@ -5098,7 +5400,11 @@ async fn insert_ledger(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     entry: LedgerInsert<'_>,
 ) -> Result<(), ApiError> {
-    sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,counterparty_user_id,external_reference,note,created_at,posted_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,CASE WHEN ?4='posted' THEN ?11 ELSE NULL END)")
+    let pre_balance_usd_nanos = ledger_chain_balance(tx, entry.user_id).await?;
+    let post_balance_usd_nanos = pre_balance_usd_nanos
+        .checked_add(entry.balance_delta_usd_nanos)
+        .ok_or_else(|| ApiError::invalid("the ledger balance would exceed the supported range"))?;
+    sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,pre_balance_usd_nanos,post_balance_usd_nanos,counterparty_user_id,external_reference,note,created_at,posted_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,CASE WHEN ?4='posted' THEN ?13 ELSE NULL END)")
         .bind(entry.id)
         .bind(entry.user_id)
         .bind(entry.kind)
@@ -5106,6 +5412,8 @@ async fn insert_ledger(
         .bind(entry.asset_id)
         .bind(entry.amount_usd_nanos)
         .bind(entry.balance_delta_usd_nanos)
+        .bind(pre_balance_usd_nanos)
+        .bind(post_balance_usd_nanos)
         .bind(entry.counterparty_user_id)
         .bind(entry.external_reference)
         .bind(entry.note)
@@ -5386,6 +5694,7 @@ async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             .await?;
     }
     migrate_usd_ledger_to_nanodollars(db).await?;
+    migrate_ledger_running_balances(db).await?;
     sqlx::query("DELETE FROM app_meta WHERE key='etherscan_api_key'")
         .execute(db)
         .await?;
@@ -5517,6 +5826,57 @@ async fn migrate_usd_ledger_to_nanodollars(db: &SqlitePool) -> anyhow::Result<()
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// Backfills the running pre/post balance chain for every existing ledger
+/// entry, then relaxes nothing: new entries always carry both values. Runs
+/// once, atomically, when the columns are first added.
+async fn migrate_ledger_running_balances(db: &SqlitePool) -> anyhow::Result<()> {
+    if !table_has_column(db, "ledger_entries", "pre_balance_usd_nanos").await? {
+        let mut tx = db.begin().await?;
+        sqlx::query("ALTER TABLE ledger_entries ADD COLUMN pre_balance_usd_nanos INTEGER")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("ALTER TABLE ledger_entries ADD COLUMN post_balance_usd_nanos INTEGER")
+            .execute(&mut *tx)
+            .await?;
+        let user_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM users")
+            .fetch_all(&mut *tx)
+            .await?;
+        for user_id in user_ids {
+            let rows = sqlx::query(
+                "SELECT id,balance_delta_usd_nanos FROM ledger_entries WHERE user_id=?1 ORDER BY rowid",
+            )
+            .bind(&user_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            let mut running: i64 = 0;
+            for row in rows {
+                let id: String = row.get(0);
+                let delta: i64 = row.get(1);
+                let pre = running;
+                running = running
+                    .checked_add(delta)
+                    .context("ledger balance overflow during running-balance backfill")?;
+                sqlx::query("UPDATE ledger_entries SET pre_balance_usd_nanos=?1,post_balance_usd_nanos=?2 WHERE id=?3")
+                    .bind(pre)
+                    .bind(running)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        tx.commit().await?;
+    }
+    if !table_has_column(db, "payment_agreement_charges", "batch_id").await? {
+        sqlx::query("ALTER TABLE payment_agreement_charges ADD COLUMN batch_id TEXT REFERENCES payment_agreement_charge_batches(id)")
+            .execute(db)
+            .await?;
+    }
+    sqlx::query("CREATE INDEX IF NOT EXISTS payment_agreement_charges_batch_idx ON payment_agreement_charges(batch_id)")
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -6673,6 +7033,420 @@ mod tests {
         }
         assert_eq!(available_balance(&db, &user_id).await.unwrap(), 1_500_000);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ledger_entries_track_running_pre_and_post_balances() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        let mut tx = db.begin().await.unwrap();
+        for (id, delta) in [
+            ("chained-a", 1000_i64),
+            ("chained-b", -400_i64),
+            ("chained-c", 250_i64),
+        ] {
+            insert_ledger(
+                &mut tx,
+                LedgerInsert {
+                    id,
+                    user_id: &user_id,
+                    kind: "adjustment",
+                    status: "posted",
+                    asset_id: None,
+                    amount_usd_nanos: delta.abs(),
+                    balance_delta_usd_nanos: delta,
+                    counterparty_user_id: None,
+                    external_reference: None,
+                    note: None,
+                    now: &now,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+        let chain: Vec<(String, i64, i64)> = sqlx::query(
+            "SELECT id,pre_balance_usd_nanos,post_balance_usd_nanos FROM ledger_entries WHERE user_id=?1 ORDER BY rowid",
+        )
+        .bind(&user_id)
+        .fetch_all(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+        assert_eq!(
+            chain,
+            vec![
+                ("chained-a".to_string(), 0, 1000),
+                ("chained-b".to_string(), 1000, 600),
+                ("chained-c".to_string(), 600, 850),
+            ]
+        );
+        assert_eq!(available_balance(&db, &user_id).await.unwrap(), 850);
+        // A released (rejected) reservation subtracts itself back out without
+        // rewriting any recorded chain value.
+        sqlx::query("UPDATE ledger_entries SET status='rejected' WHERE id='chained-b'")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(available_balance(&db, &user_id).await.unwrap(), 1250);
+        let chain_after: Vec<(i64, i64)> = sqlx::query(
+            "SELECT pre_balance_usd_nanos,post_balance_usd_nanos FROM ledger_entries ORDER BY rowid",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+        assert_eq!(chain_after, vec![(0, 1000), (1000, 600), (600, 850)]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn backfills_running_balances_for_legacy_ledger_rows() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        sqlx::query("CREATE TABLE users (id TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE ledger_entries (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,asset_id TEXT,amount_usd_nanos INTEGER NOT NULL,balance_delta_usd_nanos INTEGER NOT NULL,counterparty_user_id TEXT,external_reference TEXT UNIQUE,note TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,posted_at TEXT)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE payment_agreement_charges (id TEXT PRIMARY KEY,agreement_id TEXT NOT NULL,payer_user_id TEXT NOT NULL,amount_usd_nanos INTEGER NOT NULL,payer_ledger_entry_id TEXT NOT NULL,owner_ledger_entry_id TEXT NOT NULL,idempotency_key TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(agreement_id,idempotency_key))")
+            .execute(&db)
+            .await
+            .unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        for (id, status, delta) in [
+            ("legacy-a", "posted", 2_000_000_i64),
+            ("legacy-b", "pending", -500_000_i64),
+            ("legacy-c", "rejected", -750_000_i64),
+        ] {
+            sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment',?3,0,?4,?5)")
+                .bind(id)
+                .bind(&user_id)
+                .bind(status)
+                .bind(delta)
+                .bind(&now)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        migrate(&db).await.unwrap();
+        assert!(
+            table_has_column(&db, "ledger_entries", "pre_balance_usd_nanos")
+                .await
+                .unwrap()
+        );
+        assert!(
+            table_has_column(&db, "ledger_entries", "post_balance_usd_nanos")
+                .await
+                .unwrap()
+        );
+        assert!(
+            table_has_column(&db, "payment_agreement_charges", "batch_id")
+                .await
+                .unwrap()
+        );
+        let chain: Vec<(i64, i64)> = sqlx::query(
+            "SELECT pre_balance_usd_nanos,post_balance_usd_nanos FROM ledger_entries ORDER BY rowid",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+        assert_eq!(
+            chain,
+            vec![(0, 2_000_000), (2_000_000, 1_500_000), (1_500_000, 750_000)]
+        );
+        assert_eq!(available_balance(&db, &user_id).await.unwrap(), 1_500_000);
+        let _ = std::fs::remove_file(path);
+    }
+
+    async fn seed_charge_batch_world(
+        db: &SqlitePool,
+    ) -> (PaymentAgreement, String, String, String, String) {
+        let owner = Uuid::new_v4().to_string();
+        let payer_a = Uuid::new_v4().to_string();
+        let payer_b = Uuid::new_v4().to_string();
+        let unbound = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        for user_id in [&owner, &payer_a, &payer_b, &unbound] {
+            sqlx::query("INSERT INTO users(id) VALUES(?1)")
+                .bind(user_id)
+                .execute(db)
+                .await
+                .unwrap();
+        }
+        for (user_id, amount) in [(&payer_a, 2_000_000_i64), (&payer_b, 1_000_000_i64)] {
+            sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'adjustment','posted',?3,?3,?4)")
+                .bind(Uuid::new_v4().to_string())
+                .bind(user_id)
+                .bind(amount)
+                .bind(&now)
+                .execute(db)
+                .await
+                .unwrap();
+        }
+        let agreement_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO payment_agreements(id,owner_user_id,name,api_key_hash,api_key_prefix,created_at,updated_at) VALUES(?1,?2,'Meter','hash','midas_agreement_test',?3,?3)")
+            .bind(&agreement_id)
+            .bind(&owner)
+            .bind(&now)
+            .execute(db)
+            .await
+            .unwrap();
+        for user_id in [&payer_a, &payer_b] {
+            sqlx::query("INSERT INTO payment_agreement_bindings(agreement_id,user_id,created_at) VALUES(?1,?2,?3)")
+                .bind(&agreement_id)
+                .bind(user_id)
+                .bind(&now)
+                .execute(db)
+                .await
+                .unwrap();
+        }
+        let agreement = PaymentAgreement {
+            id: agreement_id,
+            owner_user_id: owner.clone(),
+            name: "Meter".to_string(),
+            api_key_prefix: "midas_agreement_test".to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        (agreement, owner, payer_a, payer_b, unbound)
+    }
+
+    fn charge_item(user_id: &str, amount_usd_nanos: i64) -> PaymentAgreementChargeInput {
+        PaymentAgreementChargeInput {
+            user_id: user_id.to_string(),
+            amount_usd_nanos,
+            reference: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn payment_agreement_charge_batch_settles_atomically_and_replays_idempotently() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let (agreement, owner, payer_a, payer_b, _unbound) = seed_charge_batch_world(&db).await;
+        let input = PaymentAgreementChargeBatchInput {
+            items: vec![
+                PaymentAgreementChargeInput {
+                    user_id: payer_a.clone(),
+                    amount_usd_nanos: 300_000,
+                    reference: Some("meter:1".to_string()),
+                },
+                charge_item(&payer_b, 100_000),
+                charge_item(&payer_a, 200_000),
+            ],
+        };
+        let items = normalize_payment_agreement_charge_batch(&input).unwrap();
+        let batch = post_payment_agreement_charge_batch(&db, &agreement, &items, "batch-key")
+            .await
+            .unwrap();
+        assert_eq!(batch.charges.len(), 3);
+        assert_eq!(available_balance(&db, &payer_a).await.unwrap(), 1_500_000);
+        assert_eq!(available_balance(&db, &payer_b).await.unwrap(), 900_000);
+        assert_eq!(available_balance(&db, &owner).await.unwrap(), 600_000);
+        let payer_posts: Vec<i64> = sqlx::query_scalar(
+            "SELECT post_balance_usd_nanos FROM ledger_entries WHERE user_id=?1 AND kind='transfer_out' ORDER BY rowid",
+        )
+        .bind(&payer_a)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(payer_posts, vec![1_700_000, 1_500_000]);
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT idempotency_key FROM payment_agreement_charges ORDER BY rowid",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(keys, vec!["batch-key:0", "batch-key:1", "batch-key:2"]);
+        let replay = post_payment_agreement_charge_batch(&db, &agreement, &items, "batch-key")
+            .await
+            .unwrap();
+        assert_eq!(replay.id, batch.id);
+        assert_eq!(
+            replay
+                .charges
+                .iter()
+                .map(|charge| charge.id.clone())
+                .collect::<Vec<_>>(),
+            batch
+                .charges
+                .iter()
+                .map(|charge| charge.id.clone())
+                .collect::<Vec<_>>()
+        );
+        let charges: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payment_agreement_charges")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(charges, 3);
+        let batches: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM payment_agreement_charge_batches")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(batches, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn payment_agreement_charge_batch_rejects_everything_on_any_failed_item() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let (agreement, _owner, payer_a, payer_b, unbound) = seed_charge_batch_world(&db).await;
+
+        let unbound_input = PaymentAgreementChargeBatchInput {
+            items: vec![charge_item(&payer_a, 1000), charge_item(&unbound, 1000)],
+        };
+        let items = normalize_payment_agreement_charge_batch(&unbound_input).unwrap();
+        let error = post_payment_agreement_charge_batch(&db, &agreement, &items, "atomic-1")
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(error.message.contains(&unbound));
+
+        let aggregate_input = PaymentAgreementChargeBatchInput {
+            items: vec![
+                charge_item(&payer_a, 1_200_000),
+                charge_item(&payer_a, 1_200_000),
+            ],
+        };
+        let items = normalize_payment_agreement_charge_batch(&aggregate_input).unwrap();
+        let error = post_payment_agreement_charge_batch(&db, &agreement, &items, "atomic-2")
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(error.message.contains(&payer_a));
+
+        let mixed_input = PaymentAgreementChargeBatchInput {
+            items: vec![
+                charge_item(&payer_a, 1_000_000),
+                charge_item(&payer_b, 1_100_000),
+            ],
+        };
+        let items = normalize_payment_agreement_charge_batch(&mixed_input).unwrap();
+        let error = post_payment_agreement_charge_batch(&db, &agreement, &items, "atomic-3")
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(error.message.contains(&payer_b));
+        let charges: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payment_agreement_charges")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(charges, 0);
+        let batches: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM payment_agreement_charge_batches")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(batches, 0);
+        assert_eq!(available_balance(&db, &payer_a).await.unwrap(), 2_000_000);
+        assert_eq!(available_balance(&db, &payer_b).await.unwrap(), 1_000_000);
+
+        // A cumulative total exactly equal to the available balance is allowed.
+        let boundary_input = PaymentAgreementChargeBatchInput {
+            items: vec![
+                charge_item(&payer_a, 1_000_000),
+                charge_item(&payer_a, 1_000_000),
+            ],
+        };
+        let items = normalize_payment_agreement_charge_batch(&boundary_input).unwrap();
+        let batch = post_payment_agreement_charge_batch(&db, &agreement, &items, "atomic-4")
+            .await
+            .unwrap();
+        assert_eq!(batch.charges.len(), 2);
+        assert_eq!(available_balance(&db, &payer_a).await.unwrap(), 0);
+        assert_eq!(available_balance(&db, &payer_b).await.unwrap(), 1_000_000);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn payment_agreement_charge_batch_validates_limits_and_item_shapes() {
+        let user_id = Uuid::new_v4().to_string();
+        let empty = PaymentAgreementChargeBatchInput { items: vec![] };
+        let error = normalize_payment_agreement_charge_batch(&empty).unwrap_err();
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(error.message.contains("1 to 500"));
+
+        let too_many = PaymentAgreementChargeBatchInput {
+            items: (0..=MAX_PAYMENT_AGREEMENT_CHARGE_BATCH_ITEMS)
+                .map(|_| charge_item(&user_id, 1))
+                .collect(),
+        };
+        assert!(
+            normalize_payment_agreement_charge_batch(&too_many)
+                .unwrap_err()
+                .message
+                .contains("1 to 500")
+        );
+
+        let zero_amount = PaymentAgreementChargeBatchInput {
+            items: vec![charge_item(&user_id, 0)],
+        };
+        assert!(
+            normalize_payment_agreement_charge_batch(&zero_amount)
+                .unwrap_err()
+                .message
+                .contains("items[0].amount_usd_nanos")
+        );
+
+        let bad_uuid = PaymentAgreementChargeBatchInput {
+            items: vec![charge_item(&user_id, 1), charge_item("not-a-uuid", 1)],
+        };
+        assert!(
+            normalize_payment_agreement_charge_batch(&bad_uuid)
+                .unwrap_err()
+                .message
+                .contains("items[1].user_id")
+        );
+
+        let bad_reference = PaymentAgreementChargeBatchInput {
+            items: vec![PaymentAgreementChargeInput {
+                user_id: user_id.clone(),
+                amount_usd_nanos: 1,
+                reference: Some("x".repeat(121)),
+            }],
+        };
+        assert!(
+            normalize_payment_agreement_charge_batch(&bad_reference)
+                .unwrap_err()
+                .message
+                .contains("payment reference")
+        );
+
+        let ok = normalize_payment_agreement_charge_batch(&PaymentAgreementChargeBatchInput {
+            items: vec![charge_item(&user_id, 5)],
+        })
+        .unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].amount_usd_nanos, 5);
     }
 
     #[tokio::test]

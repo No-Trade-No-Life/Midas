@@ -329,6 +329,23 @@ paths:
           description: Per-user cumulative payments, scoped to the authenticated channel
           content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementChargeSummary' } } }
         '401': { description: Missing or invalid channel API key }
+  /agreements/{id}/charge-batches:
+    post:
+      security: [ { agreementApiKey: [] } ]
+      summary: Post one atomic, idempotent batch of automatic charges (up to 500 items) in a single database transaction
+      parameters:
+        - { $ref: '#/components/parameters/AgreementApiKey' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementChargeBatchInput' } } }
+      responses:
+        '200':
+          description: Posted, idempotent automatic charge batch; every item settles or none do
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentAgreementChargeBatch' } } }
+        '401': { description: Missing or invalid channel API key }
+        '409': { description: One or more users have not authorized this channel, or a user's cumulative batch amount exceeds their available USD }
   /admin/evm-config:
     get:
       summary: Root-only EVM configuration; never returns private key material
@@ -489,6 +506,8 @@ components:
         status: { type: string, enum: [pending, posted, rejected, disabled] }
         amount_usd_nanos: { type: integer, format: int64 }
         balance_delta_usd_nanos: { type: integer, format: int64 }
+        pre_balance_usd_nanos: { type: [integer, 'null'], format: int64, description: "Account balance immediately before this entry's delta; null only for rows predating the running-balance chain." }
+        post_balance_usd_nanos: { type: [integer, 'null'], format: int64, description: "Account balance immediately after this entry's delta, including its own reservation while pending." }
         created_at: { type: string, format: date-time }
         posted_at: { type: [string, 'null'], format: date-time }
         asset_symbol: { type: [string, 'null'], enum: [USDC, USDT, null] }
@@ -715,6 +734,26 @@ components:
         amount_usd_nanos: { type: integer, format: int64 }
         amount_usd: { type: string }
         created_at: { type: string, format: date-time }
+    PaymentAgreementChargeBatchInput:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          description: Charges that post atomically; the same Idempotency-Key retries the whole batch and reusing it never double-charges.
+          items: { $ref: '#/components/schemas/PaymentAgreementChargeInput' }
+    PaymentAgreementChargeBatch:
+      type: object
+      required: [id, agreement_id, created_at, charges]
+      properties:
+        id: { type: string, format: uuid }
+        agreement_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        charges:
+          type: array
+          items: { $ref: '#/components/schemas/PaymentAgreementCharge' }
     PaymentAgreementPayoutInput:
       type: object
       required: [user_id, amount_usd_nanos]
