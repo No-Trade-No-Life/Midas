@@ -217,7 +217,7 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
 
   return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><LinkitLanguageSync setLanguage={setLanguage} /><LinkitFaviconSync /><GlobalToaster />
     <AppLayout
-      logo={{ light: <MidasMark className="size-7 shrink-0" />, dark: <MidasMark className="size-7 shrink-0" /> }}
+      logo={<MidasMark className="size-7 shrink-0" />}
       title={t("appName")}
       nav={auth.isAuthenticated ? nav : []}
       pageTitle={t(pageTitle(location.pathname))}
