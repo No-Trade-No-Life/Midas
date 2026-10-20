@@ -31,7 +31,6 @@ import {
 } from "lucide-react"
 
 import { MidasMark } from "@/components/midas-mark"
-import { applyFavicon } from "@/lib/favicon"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -215,7 +214,7 @@ function App({ linkitBaseUrl }: { linkitBaseUrl: string }) {
 
   useEffect(() => { window.localStorage.setItem("midas-language", language) }, [language])
 
-  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><LinkitLanguageSync setLanguage={setLanguage} /><LinkitFaviconSync /><GlobalToaster />
+  return <LinkitProvider lang={language === "zh" ? "zh-CN" : "en"} linkitBaseUrl={linkitBaseUrl}><LinkitLanguageSync setLanguage={setLanguage} /><GlobalToaster />
     <AppLayout
       logo={<MidasMark className="size-7 shrink-0" />}
       title={t("appName")}
@@ -698,12 +697,6 @@ function AddressBookRow({ entry, t }: { entry: AddressBookEntry; t: Translate })
 function AdminRoute({ root, t, children }: { root: boolean; t: Translate; children: React.ReactNode }) {
   if (root) return children
   return <section className="flex flex-col gap-6"><div><p className="text-sm text-muted-foreground">{t("administration")}</p><h1 className="text-2xl font-semibold tracking-tight">{t("rootOnly")}</h1></div><Alert><ShieldCheckIcon /><AlertTitle>{t("rootOnly")}</AlertTitle><AlertDescription>{t("security")}</AlertDescription></Alert></section>
-}
-
-function LinkitFaviconSync() {
-  const { resolvedTheme } = useLinkit()
-  useEffect(() => { applyFavicon(resolvedTheme) }, [resolvedTheme])
-  return null
 }
 
 function LinkitLanguageSync({ setLanguage }: { setLanguage: (language: Language) => void }) {

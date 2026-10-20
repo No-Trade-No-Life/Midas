@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const main = read('src/main.tsx');
-const favicon = read('src/lib/favicon.ts');
 const sonner = read('src/components/ui/sonner.tsx');
 const styles = read('src/styles.css');
 const indexHtml = read('index.html');
@@ -16,10 +15,7 @@ const inline = indexHtml.indexOf('linkit.theme');
 const module = indexHtml.indexOf('<script type="module"');
 if (inline < 0 || module < 0 || inline > module) throw new Error('Theme regression: the stored theme must be applied before the app module loads.');
 
-if (!favicon.includes('export function applyFavicon(resolvedTheme: keyof typeof FAVICON_STROKE)') || !favicon.includes('data:image/svg+xml')) throw new Error('Theme regression: the favicon must render the theme-colored mark.');
-if (favicon.includes('@/theme') || favicon.includes('subscribe(')) throw new Error('Theme regression: the favicon stays a pure apply function driven by the resolved Linkit theme.');
 if (!sonner.includes('useLinkit') || !sonner.includes('theme={resolvedTheme}')) throw new Error('Theme regression: toasts must follow the resolved Linkit theme.');
-if (!main.includes('applyFavicon(resolvedTheme)')) throw new Error('Theme regression: the favicon must follow the resolved Linkit theme.');
 if (!styles.includes('.dark {') || !styles.includes('--background: oklch(0.145 0 0)')) throw new Error('Theme regression: dark tokens are required.');
 if (!styles.includes('.skip-link')) throw new Error('Layout regression: the skip link component style is missing.');
 

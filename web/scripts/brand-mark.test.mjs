@@ -7,7 +7,6 @@ const favicon = readFileSync(new URL('../public/midas-mark.svg', import.meta.url
 const markComponent = readFileSync(new URL('../src/components/midas-mark.tsx', import.meta.url), 'utf8');
 const indexHtml = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
-const faviconSync = readFileSync(new URL('../src/lib/favicon.ts', import.meta.url), 'utf8');
 
 test('the favicon is a dollar mark with a light and dark palette', () => {
   assert.ok(favicon.includes(dollarMark));
@@ -25,12 +24,4 @@ test('the shell renders the dollar mark in the theme foreground color', () => {
 
 test('the favicon links the SVG mark', () => {
   assert.match(indexHtml, /<link rel="icon" type="image\/svg\+xml" href="\/midas-mark\.svg"\/>/);
-});
-
-test('the favicon follows the resolved Linkit theme', () => {
-  assert.ok(faviconSync.includes(dollarMark));
-  assert.match(faviconSync, /FAVICON_STROKE/);
-  assert.match(faviconSync, /export function applyFavicon\(resolvedTheme: keyof typeof FAVICON_STROKE\)/);
-  assert.match(faviconSync, /data:image\/svg\+xml/);
-  assert.match(main, /applyFavicon\(resolvedTheme\)/);
 });
