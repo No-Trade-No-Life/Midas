@@ -11,12 +11,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
       - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: npm, cache-dependency-path: web/package-lock.json }
+        with: { node-version: 24, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml }
       - uses: dtolnay/rust-toolchain@stable
         with: { components: rustfmt, clippy }
-      - run: npm --prefix web ci
-      - run: npm --prefix web run test
+      - run: pnpm --dir web install --frozen-lockfile
+      - run: pnpm --dir web run test
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test

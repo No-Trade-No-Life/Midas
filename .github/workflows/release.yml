@@ -17,11 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
       - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: npm, cache-dependency-path: web/package-lock.json }
+        with: { node-version: 24, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: x86_64-unknown-linux-musl }
-      - run: npm --prefix web ci && npm --prefix web run build
+      - run: pnpm --dir web install --frozen-lockfile && pnpm --dir web run build
       - name: Build static server
         run: |
           sudo apt-get update
