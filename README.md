@@ -66,15 +66,15 @@ Existing SQLite databases migrate on the first startup that carries this version
 Midas has no runtime environment-variable configuration. It binds its API to `127.0.0.1:8787`, uses the platform local-data directory on macOS and `/var/lib/midas` on Linux, and reads root-managed settings from SQLite.
 
 ```bash
-npm --prefix web ci
-npm --prefix web run build
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web run build
 cargo run
 ```
 
 Open `http://127.0.0.1:8787`. For Vite development:
 
 ```bash
-npm --prefix web run dev
+pnpm --dir web run dev
 ```
 
 ## API integration
