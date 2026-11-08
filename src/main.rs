@@ -81,6 +81,12 @@ const LOCATE_INITIAL_SCAN_BLOCKS: i64 = 5_000;
 const LOCATE_MAX_SCAN_BLOCKS: i64 = 500_000;
 const DEPOSIT_DISCOVERY_STALE_SECONDS: i64 = 300;
 const DEPOSIT_DISCOVERY_RETRY_MAX_SECONDS: i64 = 1_800;
+/// A single chain's discovery round must not be able to stall the whole loop:
+/// public RPC endpoints occasionally accept a connection and never answer.
+const DEPOSIT_DISCOVERY_CHAIN_TIMEOUT: Duration = Duration::from_secs(90);
+/// Public RPC endpoints cap `eth_getLogs` windows (50,000 blocks on BNB Smart
+/// Chain), so a wide scan is split into chunks that every endpoint accepts.
+const LOCATE_LOG_RANGE_BLOCKS: i64 = 40_000;
 const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 const ETHEREUM_DISCOVERY_RPC_URL: &str = "https://rpc.mevblocker.io";
 const BSC_DISCOVERY_RPC_URL: &str =
@@ -1529,17 +1535,33 @@ fn spawn_deposit_sweep(state: AppState, deposit_id: String) {
     });
 }
 
+/// Keeps deposit discovery alive: the worker is supervised, so a panic or an
+/// unexpected early return is logged and the loop is started again instead of
+/// leaving deposits silently undiscovered until the next deployment.
 fn start_deposit_discovery(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = time::interval(DEPOSIT_BALANCE_POLL_INTERVAL);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
-            if let Err(error) = run_deposit_discovery_cycle(&state).await {
-                eprintln!("deposit discovery cycle failed: {}", error.message);
+            let worker = tokio::spawn(deposit_discovery_loop(state.clone()));
+            match worker.await {
+                Ok(()) => eprintln!("deposit discovery loop stopped; restarting it"),
+                Err(error) => {
+                    eprintln!("deposit discovery loop panicked: {error}; restarting it")
+                }
             }
+            time::sleep(Duration::from_secs(5)).await;
         }
     });
+}
+
+async fn deposit_discovery_loop(state: AppState) {
+    let mut interval = time::interval(DEPOSIT_BALANCE_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if let Err(error) = run_deposit_discovery_cycle(&state).await {
+            eprintln!("deposit discovery cycle failed: {}", error.message);
+        }
+    }
 }
 
 async fn run_deposit_discovery_cycle(state: &AppState) -> Result<(), ApiError> {
@@ -1549,11 +1571,21 @@ async fn run_deposit_discovery_cycle(state: &AppState) -> Result<(), ApiError> {
             .await
             .map_err(db_error)?;
     for chain_id in chain_ids {
-        if let Err(error) = refresh_chain_deposit_balances(state, chain_id).await {
-            eprintln!(
+        match time::timeout(
+            DEPOSIT_DISCOVERY_CHAIN_TIMEOUT,
+            refresh_chain_deposit_balances(state, chain_id),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!(
                 "deposit discovery for chain {chain_id} failed: {}",
                 error.message
-            );
+            ),
+            Err(_) => eprintln!(
+                "deposit discovery for chain {chain_id} timed out after {}s; moving on to the next chain",
+                DEPOSIT_DISCOVERY_CHAIN_TIMEOUT.as_secs()
+            ),
         }
     }
     Ok(())
@@ -1961,34 +1993,51 @@ async fn locate_deposits_from_balance(
 ) -> Result<bool, ApiError> {
     if let Some((from_block, to_block)) = locate_scan_range(head_block, scan_blocks) {
         let recipient = parse_address(&target.address, "stored deposit address")?;
-        let mut recipient_topic = [0_u8; 32];
-        recipient_topic[12..].copy_from_slice(recipient.as_bytes());
-        let filter = serde_json::json!({
-            "fromBlock": format!("0x{from_block:x}"),
-            "toBlock": format!("0x{to_block:x}"),
-            "address": [asset.contract_address],
-            "topics": [
-                format!("{:#x}", H256::from(keccak256("Transfer(address,address,uint256)"))),
-                serde_json::Value::Null,
-                format!("{:#x}", H256::from(recipient_topic)),
-            ],
-        });
-        let logs: Vec<Log> = provider
-            .request("eth_getLogs", [filter])
-            .await
-            .map_err(chain_error)?;
-        let transfers: Vec<DiscoveredTransfer> = logs
-            .into_iter()
-            .filter_map(|log| {
-                Some(DiscoveredTransfer {
-                    hash: format!("{:#x}", log.transaction_hash?),
-                    contract_address: format!("{:#x}", log.address),
+        let mut recipient_topic_bytes = [0_u8; 32];
+        recipient_topic_bytes[12..].copy_from_slice(recipient.as_bytes());
+        let transfer_topic = format!(
+            "{:#x}",
+            H256::from(keccak256("Transfer(address,address,uint256)"))
+        );
+        let recipient_topic = format!("{:#x}", H256::from(recipient_topic_bytes));
+        for (chunk_from, chunk_to) in locate_log_chunks(from_block, to_block) {
+            let filter = serde_json::json!({
+                "fromBlock": format!("0x{chunk_from:x}"),
+                "toBlock": format!("0x{chunk_to:x}"),
+                "address": [asset.contract_address],
+                "topics": [transfer_topic, serde_json::Value::Null, recipient_topic],
+            });
+            let logs: Vec<Log> = provider
+                .request("eth_getLogs", [filter])
+                .await
+                .map_err(chain_error)?;
+            let transfers: Vec<DiscoveredTransfer> = logs
+                .into_iter()
+                .filter_map(|log| {
+                    Some(DiscoveredTransfer {
+                        hash: format!("{:#x}", log.transaction_hash?),
+                        contract_address: format!("{:#x}", log.address),
+                    })
                 })
-            })
-            .collect();
-        process_discovered_transfers(state, target, &transfers).await?;
+                .collect();
+            process_discovered_transfers(state, target, &transfers).await?;
+            if deposit_balance_settled(state, &target.wallet_id, asset.id, raw_amount).await? {
+                break;
+            }
+        }
     }
-    let unswept = load_unswept_deposit_amount(&state.db, &target.wallet_id, asset.id).await?;
+    deposit_balance_settled(state, &target.wallet_id, asset.id, raw_amount).await
+}
+
+/// Reports whether the on-chain balance of one deposit address and asset is
+/// fully explained by deposits that are already credited but not yet collected.
+async fn deposit_balance_settled(
+    state: &AppState,
+    wallet_id: &str,
+    asset_id: &str,
+    raw_amount: &str,
+) -> Result<bool, ApiError> {
+    let unswept = load_unswept_deposit_amount(&state.db, wallet_id, asset_id).await?;
     let raw = U256::from_dec_str(raw_amount)
         .map_err(|_| ApiError::invalid("stored balance is not a valid integer"))?;
     Ok(raw <= unswept)
@@ -2017,6 +2066,23 @@ fn locate_scan_range(head_block: i64, scan_blocks: i64) -> Option<(i64, i64)> {
         .saturating_sub(scan_blocks.saturating_sub(1))
         .max(0);
     (from_block <= to_block).then_some((from_block, to_block))
+}
+
+/// Splits a scan window into newest-first `eth_getLogs` chunks, because public
+/// endpoints reject ranges wider than their own cap (for example 50,000 blocks
+/// on BNB Smart Chain) and a rejected range would never resolve a deposit.
+fn locate_log_chunks(from_block: i64, to_block: i64) -> Vec<(i64, i64)> {
+    let mut chunks = Vec::new();
+    let mut chunk_to = to_block;
+    while chunk_to >= from_block {
+        let chunk_from = (chunk_to - LOCATE_LOG_RANGE_BLOCKS + 1).max(from_block);
+        chunks.push((chunk_from, chunk_to));
+        if chunk_from == from_block {
+            break;
+        }
+        chunk_to = chunk_from - 1;
+    }
+    chunks
 }
 
 fn next_locate_scan_blocks(scan_blocks: i64) -> i64 {
@@ -6217,6 +6283,12 @@ mod tests {
         assert_eq!(locate_scan_range(100, 5_000), Some((0, 98)));
         assert_eq!(locate_scan_range(1, 5_000), None);
         assert_eq!(next_locate_scan_blocks(5_000), 10_000);
+        assert_eq!(
+            locate_log_chunks(0, 99_999),
+            vec![(60_000, 99_999), (20_000, 59_999), (0, 19_999)]
+        );
+        assert_eq!(locate_log_chunks(4_999, 9_998), vec![(4_999, 9_998)]);
+        assert!(locate_log_chunks(1_000, 999).is_empty());
         assert_eq!(next_locate_scan_blocks(400_000), 500_000);
         assert_eq!(next_locate_scan_blocks(500_000), 500_000);
         assert_eq!(
