@@ -7,7 +7,24 @@ set -eu
 : "${MIDAS_ARCHIVE_NAME:=midas-linux-x86_64.tar.gz}"
 : "${MIDAS_METADATA_NAME:=midas-linux-x86_64.metadata.json}"
 release_base="https://github.com/No-Trade-No-Life/Midas/releases/download/latest"
+release_api="https://api.github.com/repos/No-Trade-No-Life/Midas/releases"
 release_dir="$MIDAS_DEPLOY_DIR/releases/$MIDAS_DEPLOY_SHA"
+
+# The release download URL redirects through a regional GitHub edge that can
+# answer 504 while the release API stays healthy; retry the same asset through
+# the authenticated-free asset endpoint before failing the deployment.
+download_asset() {
+  name="$1"
+  target="$2"
+  if curl -fsSL "$release_base/$name" -o "$target"; then
+    return 0
+  fi
+  echo "release download failed for $name; retrying through the GitHub release asset API" >&2
+  asset_id="$(curl -fsSL "$release_api/tags/latest" | python3 -c 'import json,sys
+name = sys.argv[1]
+print(next(asset["id"] for asset in json.load(sys.stdin)["assets"] if asset["name"] == name))' "$name")"
+  curl -fsSL -H "Accept: application/octet-stream" "$release_api/assets/$asset_id" -o "$target"
+}
 
 DEBIAN_FRONTEND=noninteractive apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y caddy curl ca-certificates
@@ -17,9 +34,9 @@ fi
 mkdir -p "$MIDAS_DEPLOY_DIR/releases" "$MIDAS_DATA_DIR"
 chown -R midas:midas "$MIDAS_DATA_DIR"
 chmod 700 "$MIDAS_DATA_DIR"
-curl -fsSL "$release_base/$MIDAS_ARCHIVE_NAME" -o "/tmp/$MIDAS_ARCHIVE_NAME"
-curl -fsSL "$release_base/$MIDAS_ARCHIVE_NAME.sha256" -o "/tmp/$MIDAS_ARCHIVE_NAME.sha256"
-curl -fsSL "$release_base/$MIDAS_METADATA_NAME" -o "/tmp/$MIDAS_METADATA_NAME"
+download_asset "$MIDAS_ARCHIVE_NAME" "/tmp/$MIDAS_ARCHIVE_NAME"
+download_asset "$MIDAS_ARCHIVE_NAME.sha256" "/tmp/$MIDAS_ARCHIVE_NAME.sha256"
+download_asset "$MIDAS_METADATA_NAME" "/tmp/$MIDAS_METADATA_NAME"
 (cd /tmp && sha256sum -c "$MIDAS_ARCHIVE_NAME.sha256")
 test "$(python3 -c "import json; print(json.load(open('/tmp/$MIDAS_METADATA_NAME'))['git_sha'])")" = "$MIDAS_DEPLOY_SHA"
 rm -rf "$release_dir"
