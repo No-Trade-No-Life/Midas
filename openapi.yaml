@@ -408,6 +408,23 @@ paths:
         '200':
           description: Fund user ledger
           content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/LedgerEntry' } } } }
+  /admin/fund-users/{id}/withdrawals:
+    post:
+      summary: Root-only withdrawal from one fund user's USD balance to an external EVM address, signed by the custody wallet
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WithdrawalRequest' }
+      responses:
+        '200':
+          description: Accepted after the same balance, liquidity, and gas checks as any human withdrawal
+          content: { application/json: { schema: { $ref: '#/components/schemas/WithdrawalResponse' } } }
+        '409': { description: Insufficient balance, token liquidity, gas, unavailable RPC, or missing custody configuration. No ledger debit or reservation is created. }
+        '422': { description: Target is not an active fund user }
   /admin/adjustments:
     post:
       summary: Root-only direct USD balance adjustment for any Midas user or fund account; posts one immutable adjustment ledger entry and records the acting root operator for post-hoc audit
