@@ -15,7 +15,7 @@
 - A collapsible navigation shell with a one-click header light/dark toggle; a first visit follows the OS scheme, and the favicon and browser theme color follow the effective scheme.
 - Linkit React Components, including the zero-prop `LinkitMyInfo` account control and `LinkitUserPicker` for username-based transfer recipients.
 - A root-only administration area for custody configuration, RPC discovery status, collection operations, all-user balance exposure, direct signed USD balance adjustments, and filterable, paginated global ledger review.
-- Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has no EVM wallet or blockchain API surface: its transferable Midas user ID, balance, immutable history, and one-time API key are for internal transfers only. Its API key can also read the exact cumulative transfers received from a specified Midas user, so an application can treat its fund user as a public recharge account without asking users to authorize automatic charges.
+- Root-managed fund users for applications such as 1Exchange and OpenAI LB. A fund user reuses the same Midas `users` ledger model, but has no deposit wallet and no deposit discovery: its transferable Midas user ID, balance, immutable history, and one-time API key cover internal transfers and custody-wallet withdrawals to an external address. Its API key can also read the exact cumulative transfers received from a specified Midas user, so an application can treat its fund user as a public recharge account without asking users to authorize automatic charges.
 - Direct EVM withdrawals: choose a network and USDC/USDT, then submit the destination address. Broadcast destinations appear in a per-token withdrawal address book, where users can save a note for each address × network × token combination and reuse it from the withdrawal drawer.
 - Automatic-payment agreements: an owner creates a channel, then explicitly rotates and receives its API key once; any Midas user, including that owner, explicitly authorizes the channel through a signed-in GUI page. Its API key can then make idempotent USD charges and ledger-only payouts against authorized users. A payout returns USD from the channel owner to the user and never requests an on-chain withdrawal. Charges can also arrive as one atomic, idempotent batch (up to 500 items) that settles with a single database commit, so usage metering can aggregate instead of paying a commit per call.
 - OpenAPI contract and CI foundation.
@@ -110,12 +110,16 @@ plus an optional note; it appears in the account's own history and in the global
 ledger.
 With `X-Api-Key`, a fund user may call `GET /api/balances/me`, `GET /api/ledger/me`,
 `GET /api/internal-transfers/me/inbound/{sender_user_id}`, the batched
-`POST /api/internal-transfers/me/inbound/summary`, and `POST /api/transfers`.
+`POST /api/internal-transfers/me/inbound/summary`, `POST /api/transfers`, and the
+withdrawal endpoints `GET /api/withdrawal-availability`, `GET/POST /api/withdrawals`,
+and `POST /api/withdrawals/{id}/finalize`.
 Inbound-transfer aggregates always use the fund user inferred from the key; callers
 cannot choose a recipient. They are cumulative exact nanodollars and are not reduced
-when the fund user later transfers USD out. Fund API keys cannot access EVM assets,
-deposit addresses, deposit verification, withdrawals, or root settings; the root GUI
-cannot request an on-chain withdrawal for a fund user.
+when the fund user later transfers USD out. Fund API keys still cannot access deposit addresses, deposit
+verification, or root settings, and they never receive EVM private material. A fund
+withdrawal debits that fund account's own USD ledger exactly like a human withdrawal,
+is signed by the same custody wallet, and is bounded by that account's balance and the
+same liquidity and gas checks, so keep a fund API key server-side as if it were cash.
 
 An external payment channel uses its owner-rotated `X-Api-Key` and an
 `Idempotency-Key` for `POST /api/agreements/{id}/charges` and
@@ -152,10 +156,11 @@ Treat the SQLite file as a high-value secret: restrict the `/var/lib/midas` dire
 
 ## Withdrawal availability
 
-Signed-in human users see network/token capacity, readiness, gas sufficiency, and
-observation time in the withdrawal drawer. The endpoint never returns the custody
+Signed-in human users and fund API keys see network/token capacity, readiness, gas
+sufficiency, and observation time. The endpoint never returns the custody
 address or raw RPC diagnostics. Root custody balances retain their address and
-native/USDC/USDT detail. Fund API keys cannot access availability.
+native/USDC/USDT detail. Fund API keys can read availability too, so an application can check capacity before
+requesting a withdrawal.
 
 The read cache is shared across users, bounded by the 12 built-in assets, expires
 after five seconds, caches safe failures, and bounds an RPC observation to eight

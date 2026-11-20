@@ -59,7 +59,7 @@ pub(crate) async fn read(
     headers: HeaderMap,
     Query(query): Query<AvailabilityQuery>,
 ) -> Result<Json<Availability>, ApiError> {
-    require_initialized_user(&state, &headers).await?;
+    require_internal_user(&state, &headers).await?;
     let asset =
         builtin_asset(&query.asset_id).ok_or_else(|| ApiError::invalid("unsupported asset"))?;
     // INVARIANT: all reservation mutations and cache invalidations use write_lock.
