@@ -3407,7 +3407,7 @@ async fn create_withdrawal(
     headers: HeaderMap,
     Json(input): Json<WithdrawalRequest>,
 ) -> Result<Json<WithdrawalResponse>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+    let user_id = require_internal_user(&state, &headers).await?;
     let idempotency_key = idempotency_key(&headers)?;
     Ok(Json(
         post_withdrawal(&state, &user_id, &input, &idempotency_key).await?,
@@ -3515,7 +3515,7 @@ async fn my_withdrawals(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WithdrawalResponse>>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+    let user_id = require_internal_user(&state, &headers).await?;
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM withdrawals WHERE user_id=?1 ORDER BY created_at DESC,id DESC LIMIT 100",
     )
@@ -3608,7 +3608,7 @@ async fn finalize_withdrawal(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<WithdrawalResponse>, ApiError> {
-    let user_id = require_initialized_user(&state, &headers).await?;
+    let user_id = require_internal_user(&state, &headers).await?;
     let target = load_withdrawal_target(&state.db, &id, Some(&user_id)).await?;
     let tx_hash = target
         .transaction_hash
@@ -3925,7 +3925,7 @@ async fn list_admin_withdrawals(
     headers: HeaderMap,
 ) -> Result<Json<Vec<AdminWithdrawal>>, ApiError> {
     require_root(&state, &headers).await?;
-    let rows = sqlx::query("SELECT w.id,w.user_id,w.destination_address,a.symbol,n.chain_id,n.name,w.amount_usd_nanos,w.transaction_hash,w.signed_transaction,w.status,w.last_error,w.created_at FROM withdrawals w JOIN users u ON u.id=w.user_id AND u.kind='human' JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id ORDER BY w.created_at DESC,w.id DESC LIMIT 100")
+    let rows = sqlx::query("SELECT w.id,w.user_id,w.destination_address,a.symbol,n.chain_id,n.name,w.amount_usd_nanos,w.transaction_hash,w.signed_transaction,w.status,w.last_error,w.created_at FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id ORDER BY w.created_at DESC,w.id DESC LIMIT 100")
         .fetch_all(&state.db)
         .await
         .map_err(db_error)?;
@@ -4620,7 +4620,7 @@ fn resume_pending_withdrawals(state: AppState) {
 
 async fn load_resumable_withdrawals(db: &SqlitePool) -> Result<Vec<String>, ApiError> {
     let rows = sqlx::query(
-        "SELECT w.id,w.status,w.transaction_hash,w.signed_transaction FROM withdrawals w JOIN users u ON u.id=w.user_id AND u.kind='human' WHERE w.status IN ('awaiting_signer','submitted')",
+        "SELECT w.id,w.status,w.transaction_hash,w.signed_transaction FROM withdrawals w WHERE w.status IN ('awaiting_signer','submitted')",
     )
     .fetch_all(db)
     .await
@@ -5154,7 +5154,7 @@ async fn load_withdrawal_target(
     id: &str,
     user_id: Option<&str>,
 ) -> Result<WithdrawalTarget, ApiError> {
-    let row = sqlx::query("SELECT a.contract_address,n.rpc_url,n.chain_id,w.destination_address,w.amount_usd_nanos,a.token_decimals,w.transaction_hash,w.status FROM withdrawals w JOIN users u ON u.id=w.user_id AND u.kind='human' JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE w.id=?1")
+    let row = sqlx::query("SELECT a.contract_address,n.rpc_url,n.chain_id,w.destination_address,w.amount_usd_nanos,a.token_decimals,w.transaction_hash,w.status FROM withdrawals w JOIN supported_assets a ON a.id=w.asset_id JOIN evm_networks n ON n.chain_id=a.chain_id WHERE w.id=?1")
         .bind(id)
         .fetch_optional(db)
         .await
@@ -6588,6 +6588,69 @@ mod tests {
         let mut resumable = load_resumable_withdrawals(&db).await.unwrap();
         resumable.sort();
         assert_eq!(resumable, vec!["withdrawal-0", "withdrawal-1"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    // A root-managed fund user owns a USD ledger balance and no deposit wallet,
+    // yet its withdrawal must reach the custody signer exactly like a human's.
+    #[tokio::test]
+    async fn fund_user_withdrawal_reaches_the_custody_signer() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let manager_user_id = Uuid::new_v4().to_string();
+        let fund_user_id = Uuid::new_v4().to_string();
+        let withdrawal_id = Uuid::new_v4().to_string();
+        let ledger_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&manager_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users(id,kind,name,manager_user_id,status,created_at) VALUES(?1,'fund','1Exchange Trading',?2,'active',?3)")
+            .bind(&fund_user_id)
+            .bind(&manager_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ledger_entries(id,user_id,kind,status,asset_id,amount_usd_nanos,balance_delta_usd_nanos,created_at) VALUES(?1,?2,'withdrawal','pending','56-USDT',1000000,-1000000,?3)")
+            .bind(&ledger_id)
+            .bind(&fund_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO withdrawals(id,user_id,asset_id,ledger_entry_id,destination_address,amount_usd_nanos,status,created_at,updated_at) VALUES(?1,?2,'56-USDT',?3,'0x0000000000000000000000000000000000000001',1000000,'awaiting_signer',?4,?4)")
+            .bind(&withdrawal_id)
+            .bind(&fund_user_id)
+            .bind(&ledger_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let target = load_withdrawal_target(&db, &withdrawal_id, Some(&fund_user_id))
+            .await
+            .unwrap();
+        assert_eq!(target.chain_id, 56);
+        assert_eq!(target.status, "awaiting_signer");
+        match load_withdrawal_target(&db, &withdrawal_id, Some(&manager_user_id)).await {
+            Err(error) => assert_eq!(error.status, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("only the owning account may load a withdrawal"),
+        }
+        assert_eq!(
+            load_resumable_withdrawals(&db).await.unwrap(),
+            vec![withdrawal_id.clone()]
+        );
+        let response = read_withdrawal_response(&db, &withdrawal_id).await.unwrap();
+        assert_eq!(response.asset_symbol, "USDT");
+        assert_eq!(response.status, "awaiting_signer");
+        match provision_human_wallet(&db, &fund_user_id).await {
+            Err(error) => assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY),
+            Ok(_) => panic!("fund users must not receive EVM deposit wallets"),
+        }
         let _ = std::fs::remove_file(path);
     }
 
@@ -8344,7 +8407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fund_user_is_internal_only_and_uses_transfer_ledger() {
+    async fn fund_user_has_no_deposit_wallet_and_uses_transfer_ledger() {
         let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
         let db = open_db(&path).await.unwrap();
         migrate(&db).await.unwrap();

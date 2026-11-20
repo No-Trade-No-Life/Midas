@@ -12,9 +12,10 @@ info:
     claim a missed transaction with only its chain and transaction ID.
     Human users authenticate with an Auth Mini bearer token. A root-created
     fund user has an internal USD balance, transferable Midas user ID, and
-    immutable ledger, but no EVM wallet or blockchain operation. Its X-Api-Key
-    can read that balance and ledger, create internal transfers, and aggregate
-    transfers sent to that fund user. Every payment write requires an
+    immutable ledger, but no deposit wallet. Its X-Api-Key can read that balance
+    and ledger, create internal transfers, aggregate transfers sent to that fund
+    user, and withdraw that balance to an external address through the shared
+    custody wallet. Every payment write requires an
     Idempotency-Key. Automatic-payment channels remain a separate human consent
     mechanism for backwards-compatible recurring charges.
 servers:
@@ -145,8 +146,9 @@ paths:
       responses: { '200': { description: Posted transfer }, '409': { description: Insufficient balance } }
   /withdrawal-availability:
     get:
-      summary: Authenticated human user's immediate withdrawal capacity; never includes the custody address
-      description: Shared five-second observation cache, with live pending reservations deducted. Submission rechecks fresh RPC data under the reservation lock. Fund API keys are not accepted.
+      security: [ { bearerAuth: [] }, { fundUserApiKey: [] } ]
+      summary: Caller's immediate withdrawal capacity; never includes the custody address
+      description: Shared five-second observation cache, with live pending reservations deducted. Submission rechecks fresh RPC data under the reservation lock. Accepts a human bearer token or a fund user's X-Api-Key.
       parameters:
         - { name: asset_id, in: query, required: true, schema: { type: string }, example: 1-USDC }
       responses:
@@ -159,9 +161,11 @@ paths:
         '401': { description: Human bearer authentication required }
   /withdrawals:
     get:
+      security: [ { bearerAuth: [] }, { fundUserApiKey: [] } ]
       summary: Current caller's withdrawals and their chain finality state
       responses: { '200': { description: Withdrawals } }
     post:
+      security: [ { bearerAuth: [] }, { fundUserApiKey: [] } ]
       summary: Reserve USD and return immediately; Midas signs, records the TxID, then broadcasts asynchronously
       parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody:
@@ -226,6 +230,7 @@ paths:
       responses: { '204': { description: Note removed } }
   /withdrawals/{id}/finalize:
     post:
+      security: [ { bearerAuth: [] }, { fundUserApiKey: [] } ]
       summary: Verify the exact submitted withdrawal transaction receipt and resolve its reserved ledger entry
       parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
       responses: { '200': { description: Finalized withdrawal }, '409': { description: Not confirmed yet } }
