@@ -1034,6 +1034,10 @@ fn app(state: AppState) -> Router {
             post(rotate_fund_user_api_key),
         )
         .route("/admin/fund-users/:id/ledger", get(fund_user_ledger))
+        .route(
+            "/admin/fund-users/:id/withdrawals",
+            post(create_fund_user_withdrawal),
+        )
         .route("/admin/adjustments", post(create_admin_adjustment))
         .route("/admin/balances", get(list_admin_balances))
         .route("/admin/ledger", get(list_admin_ledger))
@@ -4062,6 +4066,39 @@ async fn fund_user_ledger(
     Ok(Json(load_user_ledger(&state.db, &id).await?))
 }
 
+// A root operator funds and drains an application's fund account from the same
+// admin surface that already creates it. The withdrawal itself is the ordinary
+// one: it debits that fund account's USD ledger and the custody wallet signs it.
+async fn create_fund_user_withdrawal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<WithdrawalRequest>,
+) -> Result<Json<WithdrawalResponse>, ApiError> {
+    require_root(&state, &headers).await?;
+    require_fund_account(&state.db, &id).await?;
+    let idempotency_key = idempotency_key(&headers)?;
+    Ok(Json(
+        post_withdrawal(&state, &id, &input, &idempotency_key).await?,
+    ))
+}
+
+async fn require_fund_account(db: &SqlitePool, user_id: &str) -> Result<(), ApiError> {
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT kind FROM users WHERE id=?1 AND status='active'")
+            .bind(user_id)
+            .fetch_optional(db)
+            .await
+            .map_err(db_error)?;
+    match kind.as_deref() {
+        Some("fund") => Ok(()),
+        Some(_) => Err(ApiError::invalid(
+            "only a fund user can be withdrawn from this endpoint",
+        )),
+        None => Err(ApiError::invalid("fund user does not exist")),
+    }
+}
+
 async fn load_fund_users(db: &SqlitePool) -> Result<Vec<FundUser>, ApiError> {
     let rows = sqlx::query("SELECT u.id,u.name,k.api_key_prefix,u.created_at FROM users u JOIN fund_user_api_keys k ON k.user_id=u.id WHERE u.kind='fund' AND u.status='active' ORDER BY u.created_at DESC,u.id DESC")
         .fetch_all(db)
@@ -6588,6 +6625,44 @@ mod tests {
         let mut resumable = load_resumable_withdrawals(&db).await.unwrap();
         resumable.sort();
         assert_eq!(resumable, vec!["withdrawal-0", "withdrawal-1"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn admin_fund_withdrawal_accepts_only_active_fund_accounts() {
+        let path = std::env::temp_dir().join(format!("midas-{}.sqlite3", Uuid::new_v4()));
+        let db = open_db(&path).await.unwrap();
+        migrate(&db).await.unwrap();
+        let manager_user_id = Uuid::new_v4().to_string();
+        let fund_user_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users(id) VALUES(?1)")
+            .bind(&manager_user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users(id,kind,name,manager_user_id,status,created_at) VALUES(?1,'fund','1Exchange Trading',?2,'active',?3)")
+            .bind(&fund_user_id)
+            .bind(&manager_user_id)
+            .bind(&now)
+            .execute(&db)
+            .await
+            .unwrap();
+        require_fund_account(&db, &fund_user_id).await.unwrap();
+        assert_eq!(
+            require_fund_account(&db, &manager_user_id)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            require_fund_account(&db, &Uuid::new_v4().to_string())
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
         let _ = std::fs::remove_file(path);
     }
 

@@ -103,8 +103,10 @@ POST /api/agreements/{id}/charge-batches
 
 A root operator creates and rotates fund users through `POST /api/admin/fund-users`
 and `POST /api/admin/fund-users/{id}/api-key`. The plaintext key is returned once.
-The root operator can also adjust any human or fund account's USD balance directly
-through `POST /api/admin/adjustments`. Each adjustment is one immutable
+The root operator can also withdraw a fund user's USD balance to an external address
+through `POST /api/admin/fund-users/{id}/withdrawals` (the same flow as the human
+withdrawal, signed by the custody wallet) and adjust any human or fund account's USD
+balance directly through `POST /api/admin/adjustments`. Each adjustment is one immutable
 `adjustment` ledger entry that records the acting root operator in an audit row,
 plus an optional note; it appears in the account's own history and in the global
 ledger.
